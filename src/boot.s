@@ -1,5 +1,5 @@
-[bits 16]
-[org 0x7c00]
+bits 16
+org 0x7c00
 
 global _start
 section .text
@@ -9,7 +9,7 @@ _start:
 	mov ds, ax	;data segment
 	mov es, ax	;extra segment
 	mov ss, ax	;stack segment
-	mov sp, 0x7c00	;stack pointer
+	mov sp, 0x6000	;stack pointer
 
 	;clear screen
 	;mov ax, 0x0003
@@ -22,37 +22,54 @@ _start:
 	;setting up the a20 gate,
 	;now this is so that the bootloader can...
 	;...access over 1MiB of RAM
-	mov si, stpat
-	call print_string
+	
 	call enable_a20
-	mov si, a20_msg
-	call print_string
 
 	;reading the disk and loading the...
 	;...kernel into memory
-	mov si, read_disk_msg
-	call print_string
 
 	call read_dsksec1
 
-	mov si, rehd
+	mov si, read_disk_msg
 	call print_string
-
+	
 	;load gdt into the GDT Register
-	mov si, gdt_msg1
-	call print_string
 
 	lgdt [gdt_descriptor]
 
-	mov si, gdt_msg2
+	mov si, pm
 	call print_string
-	
+
+	mov ax, 0x0003
+	int 0x10
+
 	cli
 	mov eax, cr0
 	or eax, 1
 	mov cr0, eax
 
 	jmp CODE_SEL:pm_start
+
+;disk read label
+read_dsksec1:
+	mov ax, 0x0000
+	mov es, ax
+	mov bx, 0x8000
+	mov ah, 0x02
+	mov al, 0x01	;only read 1 sector
+	mov ch, 0x00
+	mov cl, 0x02
+	mov dh, 0x00
+	mov dl, 0x80	;prolly 0x80
+	;mov bx, 0x8000
+	int 0x13
+	jc .dsk_err	;jump if carry flag set
+	ret
+
+.dsk_err:
+	cli
+	hlt
+	jmp $
 
 [bits 32]
 pm_start:
@@ -63,8 +80,17 @@ pm_start:
 	mov gs, ax
 	mov ss, ax
 	mov esp, 0x130000
+	
+	mov al, 'J'
+	mov dx, 0x3f8
+	out dx, al
 
-	jmp 0x8000
+	mov al, 'X'
+	mov dx, 0x3f8
+	out dx, al
+
+	mov eax, 0x8000
+	jmp eax
 
 	;infinte loop
 	cli
@@ -74,29 +100,27 @@ pm_start:
 ;setting up the GDT(Global Descriptor Table)
 ;so we can jump into PM(Protected Mode/ 32 bits) safely
 gdt_start:
-	;null descriptor, must always be zeroed
-	dd 0x00000000
-	dd 0x00000000
-
-gdt_code:
-	;code descriptor
-	dw 0xffff
-	dw 0x0000
-	db 0x00
-	db 0b10011010
-	db 0b11001111
-	db 0x00
-
-gdt_data:
-	;data descriptor, almost identical to the
-	;code descriptor
-	dw 0xffff
-	dw 0x0000
-	db 0x00
-	db 0b10010010
-	db 0b11001111
-	db 0x00 
-
+	gdt_null:
+		;null descriptor, must always be zeroed
+		dd 0x00000000
+		dd 0x00000000
+	gdt_code:
+		;code descriptor
+		dw 0xffff
+		dw 0x0000
+		db 0x00
+		db 0b10011010
+		db 0b11001111
+		db 0x00
+	gdt_data:
+		;data descriptor, almost identical to the
+		;code descriptor
+		dw 0xffff
+		dw 0x0000
+		db 0x00
+		db 0b10010010
+		db 0b11001111
+		db 0x00 
 gdt_end:
 
 ;for the lgdt operation
@@ -106,8 +130,8 @@ gdt_descriptor:
 
 ;constants that we'll use in PM when...
 ;...resetting the segment registers
-CODE_SEL equ 0x0008
-DATA_SEL equ 0x0010
+CODE_SEL equ 0x08
+DATA_SEL equ 0x10
 
 ;print string label
 print_string:
@@ -133,44 +157,11 @@ enable_a20:
 	out 0x92, al
 	ret
 
-;disk read label
-read_dsksec1:
-	mov ah, 0x02
-	mov al, 0x01	;only read 1 sector
-	mov ch, 0x00
-	mov cl, 0x02
-	mov dh, 0x00
-	mov dl, 0x80	;prolly 0x80
-	mov bx, 0x800
-	int 0x13
-
-	jc .dsk_err	;jump if carry flag set
-
-	cmp al, 1
-	jne .dsk_err
-	
-	ret
-
-.dsk_err:
-	xor ax, ax
-	mov ds, ax
-
-	mov si, dsk_err
-	call print_string
-	cli
-	hlt
-	jmp $
-
 ;data section
-msg db "Welcome to BIKT OS...", 13, 10, 0
-stpat db "Setting up A20...", 13, 10, 0
-a20_msg db "A20 Enabled...", 13, 10, 0
-read_disk_msg db "Reading sectors from disk...", 13, 10, 0
-rehd db "Read Sector 1 from disk...", 13, 10, 0
-dsk_err db "Failed to Read Sector 1 of disk", 0
-gdt_msg1 db "Setting up GDT...", 13, 10, 0
-gdt_msg2 db "Finished setting up GDT...", 13, 10, 0
-
+msg db "Welcome to BIKT OS!", 13, 10, 0
+read_disk_msg db "Finished Reading Disk!", 13, 10, 0
+pm db "Entering Protected Mode...Loading Kernel...", 13, 10, 0
+dsk_err db "Failed to Read Sector 1 of disk!", 0
 
 ;force padding and boot signature
 times 510 - ($ - $$) db 0
