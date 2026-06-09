@@ -1,0 +1,203 @@
+/* _content/AskStack.WebApi/Components/ChatMessageDisplay.razor.rz.scp.css */
+.s-prose.assistantMessage[b-wmpspocgro] {
+    --_pr-h1-fs: var(--_pr-h4-fs);
+    --_pr-h2-fs: var(--_pr-h4-fs);
+    --_pr-h3-fs: var(--_pr-h4-fs);
+}
+/* _content/AskStack.WebApi/Components/Conversation.razor.rz.scp.css */
+.hs12ln[b-dmiic3v8up] { height: calc(12 * 1.45rem); }
+.hs5ln[b-dmiic3v8up] {
+    min-height: var(--lh-sm);
+    max-height: calc(5 * var(--lh-sm));
+}
+
+/* Responsive media queries moved to dynamic <style> block in Conversation.razor
+   TODO: Once non-Shine support is dropped, move these back here with 780px breakpoint */
+/* _content/AskStack.WebApi/Components/DisclaimerLinks.razor.rz.scp.css */
+.flex--item:has(+ .flex--item)[b-1eustunb9u]:after {
+    content: '|';
+    padding: 5px;
+}
+/* _content/AskStack.WebApi/Components/Feedback.razor.rz.scp.css */
+/* Responsive styles moved to dynamic <style> block in Feedback.razor
+   TODO: Once non-Shine support is dropped, move these back here with 780px breakpoint */
+/* _content/AskStack.WebApi/Components/FeedbackImprovementButton.razor.rz.scp.css */
+.s-checkbox:checked + label.s-btn__outlined[b-r9emhmcxep], .s-checkbox:checked + label.s-btn__outlined:hover[b-r9emhmcxep] {
+    background-color: var(--_bu-outlined-bg-selected); !important;
+}
+/* _content/AskStack.WebApi/Components/Layout/MainLayout.razor.rz.scp.css */
+.page[b-6gktvdff0w] {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+main[b-6gktvdff0w] {
+    flex: 1;
+}
+
+.sidebar[b-6gktvdff0w] {
+    background-image: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
+}
+
+.top-row[b-6gktvdff0w] {
+    background-color: #f7f7f7;
+    border-bottom: 1px solid #d6d5d5;
+    justify-content: flex-end;
+    height: 3.5rem;
+    display: flex;
+    align-items: center;
+}
+
+    .top-row[b-6gktvdff0w]  a, .top-row[b-6gktvdff0w]  .btn-link {
+        white-space: nowrap;
+        margin-left: 1.5rem;
+        text-decoration: none;
+    }
+
+    .top-row[b-6gktvdff0w]  a:hover, .top-row[b-6gktvdff0w]  .btn-link:hover {
+        text-decoration: underline;
+    }
+
+    .top-row[b-6gktvdff0w]  a:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+@media (max-width: 640.98px) {
+    .top-row[b-6gktvdff0w] {
+        justify-content: space-between;
+    }
+
+    .top-row[b-6gktvdff0w]  a, .top-row[b-6gktvdff0w]  .btn-link {
+        margin-left: 0;
+    }
+}
+
+@media (min-width: 641px) {
+    .page[b-6gktvdff0w] {
+        flex-direction: row;
+    }
+
+    .sidebar[b-6gktvdff0w] {
+        width: 250px;
+        height: 100vh;
+        position: sticky;
+        top: 0;
+    }
+
+    .top-row[b-6gktvdff0w] {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+    }
+
+    .top-row.auth[b-6gktvdff0w]  a:first-child {
+        flex: 1;
+        text-align: right;
+        width: 0;
+    }
+
+    .top-row[b-6gktvdff0w], article[b-6gktvdff0w] {
+        padding-left: 2rem !important;
+        padding-right: 1.5rem !important;
+    }
+}
+
+#blazor-error-ui[b-6gktvdff0w] {
+    background: lightyellow;
+    bottom: 0;
+    box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.2);
+    display: none;
+    left: 0;
+    padding: 0.6rem 1.25rem 0.7rem 1.25rem;
+    position: fixed;
+    width: 100%;
+    z-index: 5100;
+}
+
+    #blazor-error-ui .dismiss[b-6gktvdff0w] {
+        cursor: pointer;
+        position: absolute;
+        right: 0.75rem;
+        top: 0.5rem;
+    }
+/* _content/AskStack.WebApi/Components/MoreFromCommunity.razor.rz.scp.css */
+.community-list[b-zizvwolvaj] {
+    list-style: none;
+    padding-left: 0;
+}
+.community-list li[b-zizvwolvaj] {
+    display: flex;
+    align-items: start;
+    gap: 0.5rem;
+}
+.marker-icon[b-zizvwolvaj] {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+}
+/* _content/AskStack.WebApi/Components/ShineSourcePopover.razor.rz.scp.css */
+.source-card-tooltip-inner[b-7lsmw82uvm] {
+    max-width: 300px;
+}
+/* _content/AskStack.WebApi/Components/SkeletonCards.razor.rz.scp.css */
+/* Container styles */
+.skeleton-cards[b-hk7s5jm6pn] {
+    transition: opacity 150ms ease-in-out;
+    width: 100%;
+}
+
+.skeleton-cards--visible[b-hk7s5jm6pn] {
+    opacity: 1;
+}
+
+.skeleton-cards--hidden[b-hk7s5jm6pn] {
+    opacity: 0;
+    transition: opacity 200ms ease-in-out;
+}
+
+/* Base skeleton rectangle */
+.skeleton-rect[b-hk7s5jm6pn] {
+    background: var(--black-200);
+    border-radius: 5px;
+    position: relative;
+    overflow: hidden;
+}
+
+.skeleton-rect[b-hk7s5jm6pn]::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        transparent 30%,
+        var(--black-150) 50%,
+        transparent 70%,
+        transparent 100%
+    );
+    background-repeat: no-repeat;
+    animation: skeleton-sweep-b-hk7s5jm6pn 1.2s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep-b-hk7s5jm6pn {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(100%);
+    }
+}
+/* _content/AskStack.WebApi/Components/SourceCard.razor.rz.scp.css */
+.two-line-div[b-y7584ehyc1] {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.2em;
+    height: 2.4em;
+}
