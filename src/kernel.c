@@ -37,7 +37,7 @@ void kmain(void)
 {
 	vga_puts("BIKT-OS Kernel!\n");
 	vga_puts("Setting up requirements...\n");
-	vga_puts("Setting up Interrupt Descriptor Table(IDT)\n");
+	vga_puts("Setting up Interrupt Descriptor Table...\n");
 
 	while(1){
 		__asm__("hlt");
