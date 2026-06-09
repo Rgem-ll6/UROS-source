@@ -1,5 +1,4 @@
 bits 32
-org 0x0
 
 section .text
 global start

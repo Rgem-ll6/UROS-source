@@ -27,13 +27,23 @@ _start:
 
 	call read_dsksec1
 
+	mov al, 'D'
+	mov dx, 0x3f8
+	out dx, al
+
+	call pause2secs
+
 	mov si, read_disk_msg
 	call print_string
 
 	lgdt [gdt_descriptor]
 
+	call pause2secs
+
 	mov si, pm
 	call print_string
+
+	call pause2secs
 
 	mov ax, 0x0003
 	int 0x10
@@ -45,12 +55,28 @@ _start:
 
 	jmp CODE_SEL:pm_start
 
+pause2secs:
+	push ax
+	push cx
+	push dx
+
+	mov al, 0
+	mov ah, 0x86
+	mov cx, 0x001e
+	mov dx, 0x8480
+	int 0x15
+
+	pop dx
+	pop cx
+	pop ax
+	ret
+
 read_dsksec1:
-	mov ax, 0x0000
+	xor ax, ax
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 0x01	;only read 1 sector
+	mov al, 0x02	;read 4 sectors
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -85,12 +111,12 @@ enable_a20:
 pm_start:
 	cli
 	mov ebp, 0x130000
-	mov eax, DATA_SEL
-	mov ds, eax
-	mov es, eax
-	mov fs, eax
-	mov gs, eax
-	mov ss, eax
+	mov ax, DATA_SEL
+	mov ds, ax
+	mov es, ax
+	mov fs, ax
+	mov gs, ax
+	mov ss, ax
 	mov esp, ebp
 	
 	mov al, 'J'
@@ -101,7 +127,7 @@ pm_start:
 	mov dx, 0x3f8
 	out dx, al
 
-	mov eax, 0x8000
+	mov eax, KERNEL
 	jmp eax
 
 	cli
