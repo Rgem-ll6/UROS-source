@@ -1,0 +1,3 @@
+Run the build.sh binary to start qemu(if you have qemu-full installed) and the binaries here were all generated with linux elf headers
+So you would have to either run it on a WSL(Windows Subsystem for Linux) or on a Docker Desktop or an actual Linux kernel/OS
+
