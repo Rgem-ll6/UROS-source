@@ -110,7 +110,7 @@ void idt_init(void)
     // Clear all IDT entries first
     for (int i = 0; i < _IDT_ENTRIES; i++)
     {
-        idt_set_entry(i, 0, 0, 0);
+        idt_set_entry(i, 0, 0x08, 0x8E);
         //also sets entry type_attr to zero, might send CPU
         //into a triple-fault if not careful
     }

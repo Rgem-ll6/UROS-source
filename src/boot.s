@@ -38,6 +38,10 @@ _start:
 
 	lgdt [gdt_descriptor]
 
+	mov al, 'G'
+	mov dx, 0x3f8
+	out dx, al
+
 	call pause2secs
 
 	mov si, pm
@@ -119,14 +123,10 @@ pm_start:
 	mov ss, ax
 	mov esp, ebp
 	
-	mov al, 'J'
+	mov al, 'P'
 	mov dx, 0x3f8
 	out dx, al
-
-	mov al, 'X'
-	mov dx, 0x3f8
-	out dx, al
-
+	
 	mov eax, KERNEL ;direct addressing mode
 	jmp eax
 
