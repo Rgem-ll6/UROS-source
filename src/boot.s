@@ -76,7 +76,7 @@ read_dsksec1:
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 0x02	;read 4 sectors
+	mov al, 0x04	;read 2 sectors
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -127,7 +127,7 @@ pm_start:
 	mov dx, 0x3f8
 	out dx, al
 
-	mov eax, KERNEL
+	mov eax, KERNEL ;direct addressing mode
 	jmp eax
 
 	cli

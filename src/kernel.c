@@ -19,6 +19,7 @@ void vga_put_c(char c)
 	if (c == '\n')
 	{
 		cursor_pos = (cursor_pos / _VGA_COLS + 1) * _VGA_COLS;
+		//if new-line consume all the columns and wrap to next line
 	} else {
 		vga_buffer[cursor_pos] = (u16)c | ((u16)_VGA_ATTR << 8);
 		cursor_pos++;
@@ -27,10 +28,103 @@ void vga_put_c(char c)
 
 void vga_puts(const char* str)
 {
+	//loop till it reaches the null terminator '\0'
 	while(*str)
 	{
 		vga_put_c(*str++);
 	}
+}
+
+typedef struct {
+    u16 offset_low;      // Low 16 bits of handler address
+    u16 selector;        // Segment selector(normally 0x08 form our GDT remember?)
+    u8 zero;             // Always 0
+    u8 type_attr;        // 0x8E = interrupt gate
+    u16 offset_high;     // High 16 bits of handler address
+} __attribute__((packed)) IDT_Entry;
+
+typedef struct {
+    u16 size;            // Size of IDT - 1
+    u32 address;         // Address of IDT array
+} __attribute__((packed)) IDTR;
+
+#define _IDT_ENTRIES 256
+static IDT_Entry idt[_IDT_ENTRIES]; //create the 256 IDT entries
+
+void vga_put_hex(u32 num)
+{
+    const char *hex = "0123456789ABCDEF";
+    
+    vga_puts("0x");
+    
+    // Print each hex digit
+    for (int i = 7; i >= 0; i--)
+    {
+        u8 digit = (num >> (i * 4)) & 0xF;
+        vga_put_c(hex[digit]);
+    }
+}
+
+// Function to set one IDT entry
+void idt_set_entry(int index, u32 handler_addr, u16 selector, u8 type_attr)
+{
+    idt[index].offset_low = handler_addr & 0xFFFF;           // Low 16 bits
+    idt[index].offset_high = (handler_addr >> 16) & 0xFFFF;  // High 16 bits
+    idt[index].selector = selector;
+    idt[index].zero = 0;
+    idt[index].type_attr = type_attr;
+}
+
+// Load IDT into CPU
+void idt_load(void)
+{
+    IDTR idtr;
+    idtr.size = (sizeof(IDT_Entry) * _IDT_ENTRIES) - 1;  // Size - 1
+    idtr.address = (u32)&idt;                            // Address of IDT array
+    
+    // Load IDT using lidt instruction
+    __asm__("lidt %0" : : "m"(idtr));
+    
+    // Enable interrupts globally
+    //__asm__("sti"); but already done in the init
+}
+
+__attribute__((interrupt)) void divide_by_zero_handler(void *frame)
+{
+    vga_puts("\n=== INTERRUPT #0: DIVIDE BY ZERO ===\n");
+    vga_puts("A program tried to divide by zero!\n");
+    vga_puts("System halted.\n");
+    
+    while(1)
+    {
+        __asm__("hlt");
+    }
+}
+
+void idt_init(void)
+{
+	__asm__("cli"); //clear interrupts
+
+    vga_puts("Initializing IDT...\n");
+    
+    // Clear all IDT entries first
+    for (int i = 0; i < _IDT_ENTRIES; i++)
+    {
+        idt_set_entry(i, 0, 0, 0);
+        //also sets entry type_attr to zero, might send CPU
+        //into a triple-fault if not careful
+    }
+    
+    // Set up divide by zero handler
+    // Index 0, handler address, selector 0x08 (kernel code), type 0x8E (interrupt gate)
+    idt_set_entry(0, (u32)divide_by_zero_handler, 0x08, 0x8E);
+    
+    // Load IDT into CPU
+    idt_load();
+    
+    vga_puts("IDT initialized successfully!\n");
+    
+    __asm__("sti"); //start interrupts
 }
 
 void kmain(void)
@@ -39,6 +133,14 @@ void kmain(void)
 	vga_puts("Setting up requirements...\n");
 	vga_puts("Setting up Interrupt Descriptor Table...\n");
 
+	idt_init();
+
+	int i = 5;
+	int j = 0;
+	int k = i / j;
+
+	//vga_puts("Interrupt not kicking?!\n");
+	
 	while(1){
 		__asm__("hlt");
 	}

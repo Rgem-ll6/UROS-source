@@ -17,6 +17,10 @@ start:
 	mov esp, 0x130000
 	xor ebp, ebp
 
+	;mov al, 'K'
+	;mov dx, 0x3f8
+	;out dx, al
+
 	call kmain
 
 .hang:
