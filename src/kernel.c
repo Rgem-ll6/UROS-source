@@ -228,7 +228,7 @@ void idt_init(void)
     // Clear all IDT entries first
     for (int i = 0; i < _IDT_ENTRIES; i++)
     {
-        idt_set_entry(i, 0, 0x08, 0x8E);
+        idt_set_entry(i, 0, 0x08, 0x0E);
         //also sets entry type_attr to zero, might send CPU
         //into a triple-fault if not careful
     }
@@ -255,7 +255,7 @@ void idt_init(void)
     
     vga_puts("IDT initialized successfully!\n");
     
-    __asm__("sti"); //start interrupts
+    //__asm__("sti"); //start interrupts
 }
 
 void kmain(void)
@@ -263,8 +263,8 @@ void kmain(void)
 	vga_puts("BIKT-OS Kernel!\n");
 	vga_puts("Setting up requirements...\n");
 	vga_puts("Setting up Interrupt Descriptor Table...\n");
-
 	idt_init();
+	vga_puts("Setting up Device driver models...\n");
 
 	//int i = 5;
 	//int j = 0;

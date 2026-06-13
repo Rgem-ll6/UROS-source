@@ -12,7 +12,15 @@ _start:
 	mov es, ax
 	mov ss, ax
 	mov sp, 0x6000
+
+	mov ax, 0x0003
+	int 0x10
+
+	mov si, boot
+	call print_string
 	
+	call pause2secs
+
 	mov si, msg
 	call print_string
 	
@@ -21,6 +29,11 @@ _start:
 	;...access over 1MiB of RAM
 	
 	call enable_a20
+
+	mov si, a20
+	call print_string
+
+	call pause2secs
 
 	;reading the disk and loading the...
 	;...kernel into memory
@@ -31,12 +44,17 @@ _start:
 	mov dx, 0x3f8
 	out dx, al
 
-	call pause2secs
+	;call pause2secs
 
 	mov si, read_disk_msg
 	call print_string
 
 	lgdt [gdt_descriptor]
+
+	call pause2secs
+
+	mov si, gdt
+	call print_string
 
 	mov al, 'G'
 	mov dx, 0x3f8
@@ -166,6 +184,9 @@ msg db "Welcome to BIKT OS!", 13, 10, 0
 read_disk_msg db "Finished Reading Disk!", 13, 10, 0
 pm db "Entering Protected Mode...Loading Kernel...", 13, 10, 0
 dsk_err db "Failed to Read Sector 1 of disk!", 0
+boot db "Booting from Hard Disk...", 13, 10, 0
+a20 db "Enabled the A20 Gate!", 13, 10, 0
+gdt db "Setup the Global Descriptor Table!", 13, 10, 0
 
 times 510 - ($ - $$) db 0
 dw 0xaa55
