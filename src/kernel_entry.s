@@ -27,7 +27,6 @@ start:
 	cld
 	rep stosd
 
-	
 	;mov al, 'K'
 	;mov dx, 0x3f8
 	;out dx, al

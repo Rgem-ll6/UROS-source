@@ -101,6 +101,124 @@ __attribute__((interrupt)) void divide_by_zero_handler(void *frame)
     }
 }
 
+__attribute__((interrupt)) void debug_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #1: DEBUG ===\n");
+	vga_puts("Debug exception triggered (breakpoint/single-step).\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void nmi_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #2: NON-MASKABLE INTERRUPT ===\n");
+	vga_puts("Hardware error detected!\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void breakpoint_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #3: BREAKPOINT ===\n");
+	vga_puts("Breakpoint hit (int3 instruction).\n");
+}
+
+__attribute__((interrupt)) void overflow_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #4: OVERFLOW ===\n");
+	vga_puts("Signed integer overflow detected!\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void bound_range_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #5: BOUND RANGE EXCEEDED ===\n");
+	vga_puts("Array index out of bounds (BOUND instruction).\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void invalid_opcode_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #6: INVALID OPCODE ===\n");
+	vga_puts("CPU executed an unknown instruction!\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void device_not_available_handler(void *frame)
+{
+	vga_puts("\n=== EXCEPTION #7: DEVICE NOT AVAILABLE ===\n");
+	vga_puts("Floating point unit not enabled or missing.\n");
+	while(1) __asm__("hlt");
+}
+
+// Double Fault has error code - different signature
+__attribute__((interrupt)) void double_fault_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #8: DOUBLE FAULT ===\n");
+	vga_puts("Processor couldn't handle another exception!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void invalid_tss_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #10: INVALID TSS ===\n");
+	vga_puts("Task state segment is invalid!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void segment_not_present_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #11: SEGMENT NOT PRESENT ===\n");
+	vga_puts("Segment descriptor not present in memory!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void stack_fault_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #12: STACK-SEGMENT FAULT ===\n");
+	vga_puts("Stack segment violation!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	while(1) __asm__("hlt");
+}
+
+__attribute__((interrupt)) void general_protection_fault_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #13: GENERAL PROTECTION FAULT ===\n");
+	vga_puts("Memory protection violation!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	while(1) __asm__("hlt");
+}
+
+// Page Fault has error code
+__attribute__((interrupt)) void page_fault_handler(void *frame, u32 error_code)
+{
+	vga_puts("\n=== EXCEPTION #14: PAGE FAULT ===\n");
+	vga_puts("Memory page not present or access violation!\n");
+	vga_puts("Error code: ");
+	vga_put_hex(error_code);
+	vga_puts("\n");
+	
+	// Read faulting address from CR2 register
+	u32 faulting_addr;
+	__asm__("mov %%cr2, %0" : "=r"(faulting_addr));
+	vga_puts("Faulting address: ");
+	vga_put_hex(faulting_addr);
+	vga_puts("\n");
+	
+	while(1) __asm__("hlt");
+}
+
 void idt_init(void)
 {
 	__asm__("cli"); //clear interrupts
@@ -118,7 +236,20 @@ void idt_init(void)
     // Set up divide by zero handler
     // Index 0, handler address, selector 0x08 (kernel code), type 0x8E (interrupt gate)
     idt_set_entry(0, (u32)divide_by_zero_handler, 0x08, 0x8E);
-    
+   	idt_set_entry(1, (u32)debug_handler, 0x08, 0x8E);
+	idt_set_entry(2, (u32)nmi_handler, 0x08, 0x8E);
+	idt_set_entry(3, (u32)breakpoint_handler, 0x08, 0x8E);
+	idt_set_entry(4, (u32)overflow_handler, 0x08, 0x8E);
+	idt_set_entry(5, (u32)bound_range_handler, 0x08, 0x8E);
+	idt_set_entry(6, (u32)invalid_opcode_handler, 0x08, 0x8E);
+	idt_set_entry(7, (u32)device_not_available_handler, 0x08, 0x8E);
+	idt_set_entry(8, (u32)double_fault_handler, 0x08, 0x8E);
+	idt_set_entry(10, (u32)invalid_tss_handler, 0x08, 0x8E);
+	idt_set_entry(11, (u32)segment_not_present_handler, 0x08, 0x8E);
+	idt_set_entry(12, (u32)stack_fault_handler, 0x08, 0x8E);
+	idt_set_entry(13, (u32)general_protection_fault_handler, 0x08, 0x8E);
+	idt_set_entry(14, (u32)page_fault_handler, 0x08, 0x8E); 
+
     // Load IDT into CPU
     idt_load();
     
@@ -135,9 +266,9 @@ void kmain(void)
 
 	idt_init();
 
-	int i = 5;
-	int j = 0;
-	int k = i / j;
+	//int i = 5;
+	//int j = 0;
+	//int k = i / j;
 
 	//vga_puts("Interrupt not kicking?!\n");
 	
