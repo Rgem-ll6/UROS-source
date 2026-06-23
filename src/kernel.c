@@ -264,11 +264,7 @@ void kmain(void)
 	vga_puts("Setting up requirements...\n");
 	vga_puts("Setting up Interrupt Descriptor Table...\n");
 	idt_init();
-	vga_puts("Setting up Device driver models...\n");
-
-	//int i = 5;
-	//int j = 0;
-	//int k = i / j;
+	vga_puts("Setting up the PIC->Programmable Interrupt Controller\n");
 
 	//vga_puts("Interrupt not kicking?!\n");
 	

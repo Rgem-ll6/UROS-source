@@ -3,8 +3,15 @@ org 0x7c00
 
 KERNEL equ 0x8000
 
-global _start
+global start
 section .text
+
+start:
+	jmp _start
+	nop
+
+times 33 db 0
+
 _start:
 	cli
 	xor ax, ax
