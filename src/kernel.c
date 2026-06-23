@@ -1,25 +1,35 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define u8 uint8_t
-#define u16 uint16_t
-#define u32 uint32_t
-#define u64 uint64_t
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 #define _VGA_ADDRESS 0xB8000
 #define _VGA_COLS 80
 #define _VGA_ROWS 25
 #define _VGA_ATTR 0x0E
 
+#define _PIC1_COMMAND 0x20
+#define _PIC1_DATA    0x21
+#define _PIC2_COMMAND 0xA0
+#define _PIC2_DATA    0xA1
+
+#define _ICW1_INIT    0x11
+#define _ICW4_8086    0x01
+
 static volatile u16 *vga_buffer = (volatile u16 *)_VGA_ADDRESS;
 static long unsigned int cursor_pos = 0;
+
+void pic_remap(void);
+void outb(u16 port, u8 val);
 
 void vga_put_c(char c)
 {
 	if (c == '\n')
 	{
 		cursor_pos = (cursor_pos / _VGA_COLS + 1) * _VGA_COLS;
-		//if new-line consume all the columns and wrap to next line
 	} else {
 		vga_buffer[cursor_pos] = (u16)c | ((u16)_VGA_ATTR << 8);
 		cursor_pos++;
@@ -28,11 +38,50 @@ void vga_put_c(char c)
 
 void vga_puts(const char* str)
 {
-	//loop till it reaches the null terminator '\0'
 	while(*str)
 	{
 		vga_put_c(*str++);
 	}
+}
+
+void pic_remap(void) {
+    // Start initialization sequence
+    outb(_PIC1_COMMAND, _ICW1_INIT);
+    outb(_PIC2_COMMAND, _ICW1_INIT);
+
+    // Set offsets (Master: 0x20, Slave: 0x28)
+    outb(_PIC1_DATA, 0x20);
+    outb(_PIC2_DATA, 0x28);
+
+    // Tell Master there is a slave PIC at IRQ2
+    outb(_PIC1_DATA, 4);
+    // Tell Slave its cascade identity
+    outb(_PIC2_DATA, 2);
+
+    // Set mode to 8086/88
+    outb(_PIC1_DATA, _ICW4_8086);
+    outb(_PIC2_DATA, _ICW4_8086);
+
+    // Mask all interrupts until ready
+    outb(_PIC1_DATA, 0xFF);
+    outb(_PIC2_DATA, 0xFF);
+}
+
+void outb(u16 port, u8 val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+u8 inb(u16 port)
+{
+	u8 ret;
+	__asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+	return ret;
+}
+
+void pic_eoi(int irq)
+{
+	if (irq >= 8) outb(_PIC2_COMMAND, 0x20);
+	outb(_PIC1_COMMAND, 0x20);
 }
 
 typedef struct {
@@ -219,6 +268,39 @@ __attribute__((interrupt)) void page_fault_handler(void *frame, u32 error_code)
 	while(1) __asm__("hlt");
 }
 
+static u32 timer_ticks = 0;
+
+__attribute__((interrupt)) void timer_handler(void *frame)
+{
+	timer_ticks++;
+
+	if (timer_ticks % 100 == 0)
+	{
+		vga_puts(".");
+	}
+	pic_eoi(0);
+}
+
+// The index is the scan code. 0 means "no character".
+const char kdb_map[] = {
+    0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
+    'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
+};
+
+__attribute__((interrupt)) void keyboard_handler(void *frame)
+{
+	u8 scancode = inb(0x60);
+
+	if(scancode < 0x80)
+	{
+		char c = kdb_map[scancode];
+		if (c != 0) vga_put_c(c);
+	}
+	pic_eoi(1);
+}
+
 void idt_init(void)
 {
 	__asm__("cli"); //clear interrupts
@@ -249,11 +331,13 @@ void idt_init(void)
 	idt_set_entry(12, (u32)stack_fault_handler, 0x08, 0x8E);
 	idt_set_entry(13, (u32)general_protection_fault_handler, 0x08, 0x8E);
 	idt_set_entry(14, (u32)page_fault_handler, 0x08, 0x8E); 
+	idt_set_entry(0x20, (u32)timer_handler, 0x08, 0x8E);
+	idt_set_entry(0x21, (u32)keyboard_handler, 0x08, 0x8E);
 
     // Load IDT into CPU
     idt_load();
     
-    vga_puts("IDT initialized successfully!\n");
+    vga_puts("IDT initialized with PIC support!\n");
     
     //__asm__("sti"); //start interrupts
 }
@@ -265,8 +349,14 @@ void kmain(void)
 	vga_puts("Setting up Interrupt Descriptor Table...\n");
 	idt_init();
 	vga_puts("Setting up the PIC->Programmable Interrupt Controller\n");
+	pic_remap();
 
-	//vga_puts("Interrupt not kicking?!\n");
+	outb(_PIC1_DATA, 0xFC);
+	outb(_PIC2_DATA, 0xFF);
+
+	__asm__("sti");
+
+	vga_puts("PIC initialized and interrupts enabled");
 	
 	while(1){
 		__asm__("hlt");
