@@ -39,6 +39,30 @@ void mouse_wait(u8 type);
 void mouse_write(u8 val);
 void mouse_init(void);
 
+// Sends a 16-bit word to a hardware port
+void outw(u16 port, u16 val) {
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+int strcmp(const char* s1, const char* s2)
+{
+	while (*s1 && (*s1 == *s2))
+	{
+		s1++;
+		s2++;
+	}
+	return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+void memset(void *dest, u8 val, u32 len)
+{
+	u8* ptr = (u8*)dest;
+	while (len--)
+	{
+		*ptr++ = val;
+	}
+}
+
 void vga_put_c(char c)
 {
 	//handle new-line character...
@@ -135,6 +159,7 @@ typedef struct {
 #define _IDT_ENTRIES 256
 static IDT_Entry idt[_IDT_ENTRIES]; //create the 256 IDT entries
 
+//printf hexadecimal text...
 void vga_put_hex(u32 num)
 {
     const char *hex = "0123456789ABCDEF";
@@ -345,7 +370,34 @@ __attribute__((interrupt)) void simd_floating_point_exception_handler(void *fram
 		__asm__("hlt");
 }
 
+#define _PIT_COMMAND 0x43
+#define _PIT_CHANNEL0 0x40
+
+// Configure PIT to fire at a specific frequency (Hz)
+void pit_init(u32 frequency) {
+    // 1193182 Hz is the internal PIT oscillator frequency
+    u32 divisor = 1193182 / frequency;
+
+    // Command byte: Channel 0, access lo/hi byte, square wave mode, 16-bit binary
+    // 0x36 = 00110110b
+    outb(_PIT_COMMAND, 0x36);
+
+    // Send divisor split across low byte and high byte
+    outb(_PIT_CHANNEL0, (u8)(divisor & 0xFF));
+    outb(_PIT_CHANNEL0, (u8)((divisor >> 8) & 0xFF));
+}
+
 static u32 timer_ticks = 0; //timer ticks...
+
+void sleep(u32 milliseconds)
+{
+	u32 target_ticks = timer_ticks + milliseconds;
+
+	while (timer_ticks < target_ticks)
+	{
+		__asm__ volatile("hlt");
+	}
+}
 
 __attribute__((interrupt)) void timer_handler(void *frame)
 {
@@ -377,6 +429,7 @@ char buffer_pop(void) {
     return c;
 }
 
+//special case keys for the keyboard interrpt and drivers
 int shift_pressed = 0;
 int caps_lock = 0;
 int ctrl_key = 0;
@@ -436,6 +489,7 @@ __attribute__((interrupt)) void keyboard_handler(void *frame)
 	pic_eoi(1);
 }
 
+//the COM1 port handler...
 __attribute__((interrupt)) void com1_handler(void *frame)
 {
 	vga_puts("COM1 Activity!\n");
@@ -443,6 +497,8 @@ __attribute__((interrupt)) void com1_handler(void *frame)
 }
 
 //MOUSE INIT, waking up the mouse...
+// mouse wait method, to wait for input to be data to be ready or...
+// ...input to be empty
 void mouse_wait(u8 type)
 {
 	u32 timeout = 100000;
@@ -454,6 +510,7 @@ void mouse_wait(u8 type)
 	}
 }
 
+//writes to the mouse, [data]
 void mouse_write(u8 val)
 {
 	mouse_wait(1); //wait for input to be empty
@@ -462,6 +519,7 @@ void mouse_write(u8 val)
 	outb(0x60, val); //send the actual data
 }
 
+//initializes the mouse
 void mouse_init(void)
 {
     u8 status;
@@ -518,6 +576,7 @@ __attribute__((interrupt)) void mouse_handler(void *frame)
 }
 
 // Generic interrupt handler
+// This handles unexpected interrupts that haven't been mapped yet...
 __attribute__((interrupt)) void default_interrupt_handler(void *frame) {
     vga_puts("\n=== UNEXPECTED INTERRUPT ===\n");
     vga_puts("An unexpected interrupt occurred! System halted.\n");
@@ -526,6 +585,7 @@ __attribute__((interrupt)) void default_interrupt_handler(void *frame) {
     }
 }
 
+//initializees the IDT
 void idt_init(void)
 {
     __asm__("cli"); //clear interrupts
@@ -567,8 +627,6 @@ void idt_init(void)
 
     // Load IDT into CPU
     idt_load();
-    vga_puts("IDT initialized with specific handlers!\n");
-
     //__asm__("sti"); //start interrupts
 }
 
@@ -618,50 +676,190 @@ void serial_puts(const char* str)
 	}
 }
 
+void qemu_shutdown(void) {
+    // QEMU newer versions / Bochs ACPI shutdown
+    outw(0x604, 0x2000);
+    // QEMU older versions (VirtualBox / PCem often support this port too)
+    outw(0xB004, 0x2000);
+}
+
+#define _SHELL_BUFFER_SIZE  256
+char shell_buffer[_SHELL_BUFFER_SIZE];
+u32 shell_index = 0;
+
 //main kernel function
 void kmain(void)
 {
-	serial_init();
-	serial_puts("Inside kernel!\n");
-	vga_puts("BIKT-OS KERNEL!\n");
-	vga_puts("Setting up Kernel...\n");
-	vga_puts("Setting up Interrupt Descriptor Table...\n");
-	//set up idt
-	idt_init();
-	serial_puts("Set up IDT!\n");
-	vga_puts("Setting up the PIC->Programmable Interrupt Controller...\n");
-	//remap all the PIC IRQ entries
-	pic_remap();
-	serial_puts("Remapped the PIC!\n");
+	serial_init();     // Ready the serial interface
+	pit_init(1000);    // Configure timer ticks to 1ms
+	idt_init();        // Set up interrupt handlers silently
+	pic_remap();       // Remap PIC away from CPU exception vectors
 
-	//set the Master and Slave bits so the PIC can currently take...
-	//...IRQ 0, 1, 2, 3, 4, 12
-	outb(_PIC1_DATA, 0xF8);
-	outb(_PIC2_DATA, 0xEF);
-	serial_puts("Set master and slave for PIC!\n");
+	// Unmask required hardware interrupt lines
+	outb(_PIC1_DATA, 0xF0); // Open Timer (IRQ0), Keyboard (IRQ1), COM1 (IRQ4)
+	outb(_PIC2_DATA, 0xEF); // Open Mouse (IRQ12)
 
-	vga_puts("PIC initialized and interrupts enabled\n");
-	vga_puts("Setting up Driver Models...\n");
+	// Bring the kernel to life globally!
+	__asm__("sti");
 
-	//initialize the drivers...
-	mouse_init();
-
-	while (inb(0x64) & 1)
-	{
+	// Flush old keyboard controller trailing bytes safely
+	while (inb(0x64) & 1) {
 		inb(0x60);
 	}
 
-	vga_puts("Serial Driver initialized!\n");
-	serial_puts("Serial Driver initialized!\n");
-	vga_puts("Keyboard Driver initialized!\n");
-	serial_puts("Keyboard Driver initialized!\n");
-	vga_puts("Mouse Driver initialized!\n");
-	serial_puts("Mouse Driver initialized!\n");
-	serial_puts("set up all drivers!\n");
+	serial_puts("Silent core initialization successful. Booting UI...\n");
 
-	__asm__("sti"); //enable interrupts
+	vga_puts("BIKT-OS KERNEL v1.0.0 (Unix Like)\n");
+	vga_puts("Copyright (c) 2026 Ugwu Rhema.\n");
+	vga_puts("\n");
+	sleep(400);
+	vga_puts("[ OK ] - Initializing GDT and system descriptors...\n");
+	sleep(500);
+	vga_puts("[ OK ] - Interrupt Descriptor Table (IDT) loaded.\n");
+	sleep(400);
+	vga_puts("[ OK ] PIC successfully remapped. Vector offsets: 0x20 / 0x28.\n");
+	sleep(600);
+	vga_puts("[ INFO ] Initializing peripheral driver models...\n");
+	mouse_init();
+	sleep(500);
+	vga_puts("[ OK ] Serial COM1 port driver active.\n");
+	sleep(400);
+	vga_puts("[ OK ] i8042 PS/2 Keyboard driver active.\n");
+	sleep(400);
+	vga_puts("[ OK ] PS/2 Mouse driver pointer subsystem active.\n");
+	sleep(800);
+	vga_puts("\nSetting of all essesntials done, Launching user session in 3 seconds...\n");
+	sleep(3000);
 
-	//halt the CPU forever after executing instructions...
+	//clear screen...
+	cursor_pos = 0;
+	volatile u16 *vga = (volatile u16 *)_VGA_ADDRESS;
+    for (int i = 0; i < _VGA_COLS * _VGA_ROWS; i++) {
+        vga[i] = (u16)' ' | ((u16)_VGA_ATTR << 8);
+    }
+
+    vga_puts("Welcome to the BIKT_OS CLI(Command Line Interface)\n");
+    vga_puts("Type 'help' foe a list of helpful commands\n");
+
+    vga_puts("######   \n");
+	vga_puts("#     #  \n");
+	vga_puts("#     #  \n");
+	vga_puts("######   \n");
+	vga_puts("#     #  \n");
+	vga_puts("#     #  \n");
+	vga_puts("######   \n\n");
+
+	//initail prompt
+	vga_puts("@root:bikt_os> ");
+	serial_puts("@root:bikt_os> ");
+
+	memset(shell_buffer, 0, _SHELL_BUFFER_SIZE);
+
+	while (1)
+	{
+		char c = buffer_pop();
+
+		if (c != 0)
+		{
+			//Handle enter key...
+			if (c == '\n')
+			{
+				vga_put_c('\n');
+
+				shell_buffer[shell_index] = '\0'; //null-terminate the string
+
+				//command parser...
+				if (shell_index > 0)
+				{
+					if (strcmp(shell_buffer, "help") == 0)
+					{
+						vga_puts("Commands currently available: \n");
+						vga_puts("help| exit | whereami | fetch | clear | ping | wifi connect nearest\n");
+					} else if (strcmp(shell_buffer, "clear") == 0){
+						// Quick screen clear: reset cursor and wipe VGA memory space
+                    	extern long unsigned int cursor_pos; // access your global cursor tracking
+                     	cursor_pos = 0;
+                      	volatile u16 *vga = (volatile u16 *)0xB8000;
+                       	for (int i = 0; i < 80 * 25; i++) {
+                        	vga[i] = (u16)' ' | ((u16)0x0E << 8);
+                        }
+
+					} else if (strcmp(shell_buffer, "ping") == 0){
+						vga_puts("pong!\n");
+					} else if (strcmp(shell_buffer, "fetch") == 0){
+						vga_puts("BIKT-OS KERNEL version 1.0.0\n");
+						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");
+						vga_puts("######   \n");
+						vga_puts("#     #  \n");
+						vga_puts("#     #  \n");
+						vga_puts("######   \n");
+						vga_puts("#     #  \n");
+						vga_puts("#     #  \n");
+						vga_puts("######   \n\n");
+					} else if (strcmp(shell_buffer, "wifi connect nearest") == 0){
+						vga_puts("wifi connected\n");
+					} else if (strcmp(shell_buffer, "exit") == 0){
+						vga_puts("Shutting down BIKT-OS safely...\n");
+						serial_puts("Shutdown command executed via CLI. Halting system.\n");
+
+						// 1. Wait a moment for visual feedback
+						sleep(1000);
+
+						// 2. Try QEMU/Emulator explicit shutdown ports
+						qemu_shutdown();
+
+						// 3. Fallback: If running on real hardware (where port 0x604 does nothing),
+						// turn off interrupts and lock the CPU in a dead loop so it's safe to power off.
+						vga_puts("It is now safe to turn off your computer.\n");
+						__asm__ volatile("cli"); // Disable interrupts so the clock timer stops waking it up
+						while(1) {
+							__asm__ volatile("hlt"); // Put CPU into deep sleep forever
+						}
+					} else if (strcmp(shell_buffer, "whereami") == 0){
+						vga_puts("you are in root!\n");
+					} else {
+						vga_puts("/bin/bish: unknown command: ");
+						vga_puts(shell_buffer);
+						vga_puts("\n");
+					}
+				}
+
+				//reset shell for next command...
+				memset(shell_buffer, 0, _SHELL_BUFFER_SIZE);
+				shell_index = 0;
+
+				vga_puts("\n@root:bikt_os> ");
+				serial_puts("\n@root:bikt_os> ");
+			} else if (c == '\b'){
+				//handle backspace key...
+				if (shell_index > 0)
+				{
+					shell_index--;
+					shell_buffer[shell_index] = 0;
+
+					//trigger visual backspace deletion on VGA
+					vga_put_c('\b');
+				}
+			} else {
+				//handle regular characters...
+				if (shell_index < _SHELL_BUFFER_SIZE - 1)
+				{
+					shell_buffer[shell_index] = c;
+					shell_index++;
+
+					vga_put_c(c);
+					serial_put_c(c);
+				}
+			}
+		}
+
+		__asm__("hlt"); //rest CPU until next interrupt!
+	}
+
+	/*//halt the CPU forever after executing instructions...
+	is what we would've continued doing until we got our
+	keyboard and mouse drivers working, my don't we make a CLI
+	above!
 	while(1){
 		char c = buffer_pop();
 		if (c != 0)
@@ -671,4 +869,7 @@ void kmain(void)
 		}
 		__asm__("hlt");
 	}
+*/
 }
+
+//IT WAS PERFECT!

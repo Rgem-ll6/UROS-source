@@ -105,7 +105,7 @@ read_dsksec1:
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 18 ;readsectors
+	mov al, 23 ;readsectors
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
