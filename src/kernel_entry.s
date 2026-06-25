@@ -15,15 +15,15 @@ start:
 	mov fs, ax
 	mov gs, ax
 	mov ss, ax
-	
-	mov esp, 0x130000
+
+	mov esp, 0x70000 ; Set stack pointer to a safer address
 	xor ebp, ebp
 
 	mov edi, __bss_start
 	xor eax, eax
 	mov ecx, __bss_end
 	sub ecx, __bss_start
-	shr ecx, 2              
+	shr ecx, 2
 	cld
 	rep stosd
 

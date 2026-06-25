@@ -25,16 +25,16 @@ _start:
 
 	mov si, boot
 	call print_string
-	
+
 	call pause2secs
 
 	mov si, msg
 	call print_string
-	
+
 	;setting up the a20 gate,
 	;now this is so that the bootloader can...
 	;...access over 1MiB of RAM
-	
+
 	call enable_a20
 
 	mov si, a20
@@ -105,7 +105,7 @@ read_dsksec1:
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 14	;read sectors
+	mov al, 18 ;readsectors
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -147,11 +147,11 @@ pm_start:
 	mov gs, ax
 	mov ss, ax
 	mov esp, ebp
-	
+
 	mov al, 'P'
 	mov dx, 0x3f8
 	out dx, al
-	
+
 	mov eax, KERNEL ;direct addressing mode
 	jmp eax
 
