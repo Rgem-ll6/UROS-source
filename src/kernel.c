@@ -392,7 +392,7 @@ const char kdb_map[] = {
 
 __attribute__((interrupt)) void keyboard_handler(void *frame)
 {
-	u8 scancode = inb(0x60); //read from the keyboard PIC port
+	u8 scancode = inb(0x60); //read from the keyboard PIC ports
 
 	//detect if it is a break code... (key release)
 	if (scancode & 0x80)
@@ -459,7 +459,7 @@ void mouse_write(u8 val)
 	mouse_wait(1); //wait for input to be empty
 	outb(0x64, 0xD4); //send to the Mouse PIC port that we wanna write
 	mouse_wait(1);
-	outb(0x64, val); //send the actual data
+	outb(0x60, val); //send the actual data
 }
 
 void mouse_init(void)
@@ -473,7 +473,7 @@ void mouse_init(void)
     outb(0x64, 0x20); // Read Command Byte
     mouse_wait(0);
     status = inb(0x60);
-    status |= 3;      // <--- SET BOTH BIT 0 (Keyboard) AND BIT 1 (Mouse)
+    status |= 3;      // SET BOTH BIT 0 (Keyboard) AND BIT 1 (Mouse)
 
     mouse_wait(1);
     outb(0x64, 0x60); // Write Command Byte
@@ -525,8 +525,6 @@ __attribute__((interrupt)) void default_interrupt_handler(void *frame) {
         __asm__("hlt");
     }
 }
-
-// ... (rest of the file)
 
 void idt_init(void)
 {
@@ -623,6 +621,7 @@ void serial_puts(const char* str)
 //main kernel function
 void kmain(void)
 {
+	serial_init();
 	serial_puts("Inside kernel!\n");
 	vga_puts("BIKT-OS KERNEL!\n");
 	vga_puts("Setting up Kernel...\n");
@@ -635,17 +634,16 @@ void kmain(void)
 	pic_remap();
 	serial_puts("Remapped the PIC!\n");
 
-	//set the Master and Slave bits so the PIC cna currently take...
+	//set the Master and Slave bits so the PIC can currently take...
 	//...IRQ 0, 1, 2, 3, 4, 12
-	outb(_PIC1_DATA, 0xFF);
-	outb(_PIC2_DATA, 0xFF);
+	outb(_PIC1_DATA, 0xF8);
+	outb(_PIC2_DATA, 0xEF);
 	serial_puts("Set master and slave for PIC!\n");
 
 	vga_puts("PIC initialized and interrupts enabled\n");
 	vga_puts("Setting up Driver Models...\n");
 
-	//initialize the serial driver...
-	serial_init();
+	//initialize the drivers...
 	mouse_init();
 
 	while (inb(0x64) & 1)
@@ -660,9 +658,6 @@ void kmain(void)
 	vga_puts("Mouse Driver initialized!\n");
 	serial_puts("Mouse Driver initialized!\n");
 	serial_puts("set up all drivers!\n");
-
-	outb(_PIC1_DATA, 0xF8);
-	outb(_PIC2_DATA, 0xEF);
 
 	__asm__("sti"); //enable interrupts
 
