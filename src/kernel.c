@@ -787,7 +787,7 @@ void kmain(void)
 					} else if (strcmp(shell_buffer, "ping") == 0){
 						vga_puts("pong!\n");
 					} else if (strcmp(shell_buffer, "fetch") == 0){
-						vga_puts("BIKT-OS KERNEL version 1.0.0\n");
+						vga_puts("\nBIKT-OS KERNEL version 1.0.0\n");
 						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");
 						vga_puts("######   \n");
 						vga_puts("#     #  \n");
@@ -795,7 +795,7 @@ void kmain(void)
 						vga_puts("######   \n");
 						vga_puts("#     #  \n");
 						vga_puts("#     #  \n");
-						vga_puts("######   \n\n");
+						vga_puts("######   \n");
 					} else if (strcmp(shell_buffer, "wifi connect nearest") == 0){
 						vga_puts("wifi connected\n");
 					} else if (strcmp(shell_buffer, "exit") == 0){
