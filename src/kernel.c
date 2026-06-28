@@ -743,17 +743,20 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 	sleep(500);
 	vga_puts("[ OK ] - Interrupt Descriptor Table (IDT) loaded.\n");
 	sleep(400);
-	vga_puts("[ OK ] PIC successfully remapped. Vector offsets: 0x20 / 0x28.\n");
+	vga_puts("[ OK ] - PIC successfully remapped. Vector offsets: 0x20 / 0x28.\n");
 	sleep(600);
-	vga_puts("[ INFO ] Initializing peripheral driver models...\n");
+	vga_puts("[ INFO ] - Initializing peripheral driver models...\n");
 	mouse_init();
 	sleep(500);
-	vga_puts("[ OK ] Serial COM1 port driver active.\n");
+	vga_puts("[ OK ] - Serial COM1 port driver active.\n");
 	sleep(400);
-	vga_puts("[ OK ] i8042 PS/2 Keyboard driver active.\n");
+	vga_puts("[ OK ] - i8042 PS/2 Keyboard driver active.\n");
 	sleep(400);
-	vga_puts("[ OK ] PS/2 Mouse driver pointer subsystem active.\n");
+	vga_puts("[ OK ] - PS/2 Mouse driver pointer subsystem active.\n");
 	sleep(800);
+	vga_puts("[ INFO ] - Setting up Physical and Virtual Memory Management. \n");
+	sleep(500);
+	vga_puts("[ OK ] - Memory Map enabled. \n");
 	vga_puts("\nSetting of all essesntials done, Launching user session in 3 seconds...\n");
 	sleep(3000);
 
@@ -801,8 +804,9 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 				{
 					if (strcmp(shell_buffer, "help") == 0)
 					{
-						vga_puts("Commands currently available: \n");
-						vga_puts("help| exit | whereami | fetch | clear | ping | wifi connect nearest\n");
+						vga_puts("Commands currently available: \n\n");
+						vga_puts("help| exit | whereami | fetch | clear | ping | wifi| mem\n");
+						vga_puts("mmap|\n");
 					} else if (strcmp(shell_buffer, "clear") == 0){
 						// Quick screen clear: reset cursor and wipe VGA memory space
                     	extern long unsigned int cursor_pos; // access your global cursor tracking
@@ -888,7 +892,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("#     #  \n");
 						vga_puts("#     #  \n");
 						vga_puts("######   \n");
-					} else if (strcmp(shell_buffer, "wifi connect nearest") == 0){
+					} else if (strcmp(shell_buffer, "wifi") == 0){
 						vga_puts("wifi connected\n");
 					} else if (strcmp(shell_buffer, "exit") == 0){
 						vga_puts("Shutting down BIKT-OS safely...\n");
