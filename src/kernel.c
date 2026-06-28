@@ -156,6 +156,14 @@ typedef struct {
     u32 address;         // Address of IDT array
 } __attribute__((packed)) IDTR;
 
+typedef struct 
+{
+	u64 base_address;
+	u64 length;
+	u32 type;	//type 1, usable RAM; type 2, reserved hardware
+	u32 acpi_extended;
+} __attribute__((packed)) MemoryMapEntry;
+
 #define _IDT_ENTRIES 256
 static IDT_Entry idt[_IDT_ENTRIES]; //create the 256 IDT entries
 
@@ -688,7 +696,7 @@ char shell_buffer[_SHELL_BUFFER_SIZE];
 u32 shell_index = 0;
 
 //main kernel function
-void kmain(void)
+void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 {
 	serial_init();     // Ready the serial interface
 	pit_init(1000);    // Configure timer ticks to 1ms
@@ -731,6 +739,8 @@ void kmain(void)
 	vga_puts("\nSetting of all essesntials done, Launching user session in 3 seconds...\n");
 	sleep(3000);
 
+
+	//CLI here broski....
 	//clear screen...
 	cursor_pos = 0;
 	volatile u16 *vga = (volatile u16 *)_VGA_ADDRESS;
@@ -786,6 +796,55 @@ void kmain(void)
 
 					} else if (strcmp(shell_buffer, "ping") == 0){
 						vga_puts("pong!\n");
+					} else if (strcmp(shell_buffer, "whoami") == 0){
+						vga_puts("root\n");
+					} else if (strcmp(shell_buffer, "mmap") == 0){
+						vga_puts("Type: 1=Usable RAM | 2=Reserved Hardware\n");
+						vga_puts("BASE-ADDRESS------LENGTH------TYPE\n");
+						vga_puts("__________________________________\n");
+
+						u32 lines_printed = 0;
+						
+						for (u32 i = 0; i < memory_entries_count; ++i)
+						{
+							if (lines_printed > 0 && lines_printed % 10 == 0)
+							{
+								vga_puts("\n-- Press ANY key for entries --");
+
+								while (buffer_pop() != 0);
+
+								char wait_char = 0;
+								while (wait_char == 0)
+								{
+									__asm__ volatile("hlt"); //rest CPU safely
+									wait_char = buffer_pop();
+								}
+
+								for (int b = 0; b < 31; b++)
+								{
+									vga_put_c('\b');
+								}
+							}
+							//prints base address
+							vga_put_hex((u32)mmap_entries[i].base_address);
+							vga_puts("------");
+
+							//prints length
+							vga_put_hex((u32)mmap_entries[i].length);
+							vga_puts("------");
+
+							if (mmap_entries[i].type == 1)
+							{
+								vga_puts("1 (Usable)\n");
+							} else {
+								vga_puts("2 (Reserved)\n");
+							}
+
+							lines_printed++;
+						}
+					} else if (strcmp(shell_buffer, "sleep") == 0 ){
+						vga_puts("Sleeping for 2 Seconds\n");
+						sleep(2000);
 					} else if (strcmp(shell_buffer, "fetch") == 0){
 						vga_puts("\nBIKT-OS KERNEL version 1.0.0\n");
 						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");

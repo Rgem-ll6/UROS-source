@@ -16,9 +16,7 @@ start:
 	mov gs, ax
 	mov ss, ax
 
-	mov esp, 0x70000 ; Set stack pointer to a safer address
-	xor ebp, ebp
-
+	;zero out BSS(Uninitialized data) section
 	mov edi, __bss_start
 	xor eax, eax
 	mov ecx, __bss_end
@@ -26,10 +24,6 @@ start:
 	shr ecx, 2
 	cld
 	rep stosd
-
-	;mov al, 'K'
-	;mov dx, 0x3f8
-	;out dx, al
 
 	call kmain
 

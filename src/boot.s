@@ -23,9 +23,6 @@ _start:
 	mov ax, 0x0003
 	int 0x10
 
-	mov si, boot
-	call print_string
-
 	call pause2secs
 
 	mov si, msg
@@ -42,6 +39,13 @@ _start:
 
 	call pause2secs
 
+	mov si, mmap
+	call print_string
+
+	call pause2secs
+
+	call detect_memory
+	
 	;reading the disk and loading the...
 	;...kernel into memory
 
@@ -100,12 +104,43 @@ pause2secs:
 	pop ax
 	ret
 
+NUM_MEMORY_ENTRIES_PTR equ 0x1000
+MEMORY_MAP_BUFFER_PTR equ 0x1004
+
+detect_memory:
+	pushad ;save all registers safely
+	xor ebx, ebx
+	mov edx, 0x534d4150 ;magic number 'SMAP'
+	mov di, MEMORY_MAP_BUFFER_PTR
+
+	;zero out initial counter slot
+	mov dword [NUM_MEMORY_ENTRIES_PTR], 0
+
+.mem_loop:
+	mov eax, 0xe820 ;bios function request map!
+	mov ecx, 24 ;request a 24-byte entry structure
+	int 0x15
+	jc .mem_done ;if carry flag is set, list is complete
+
+	cmp eax, 0x534d4150 ;verify CPU responded with 'SMAP'
+	jne .mem_done
+
+	add di, 24 ;incerment buffer pointer foward
+	inc dword [NUM_MEMORY_ENTRIES_PTR] ;increment map entry counter
+
+	test ebx, ebx ;if ebx is 0, parsing is done
+	jne .mem_loop
+
+.mem_done:
+	popad ;as you know what this does, restore all registers
+	ret
+	
 read_dsksec1:
 	xor ax, ax
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 23 ;readsectors
+	mov al, 25
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -152,6 +187,9 @@ pm_start:
 	mov dx, 0x3f8
 	out dx, al
 
+	push dword MEMORY_MAP_BUFFER_PTR ;argument 2: mmap ptr address
+	push dword [NUM_MEMORY_ENTRIES_PTR] ;argument 1: entries count value
+	
 	mov eax, KERNEL ;direct addressing mode
 	jmp eax
 
@@ -188,12 +226,12 @@ CODE_SEL equ 0x08
 DATA_SEL equ 0x10
 
 msg db "Welcome to BIKT OS!", 13, 10, 0
-read_disk_msg db "Finished Reading Disk!", 13, 10, 0
-pm db "Entering Protected Mode...Loading Kernel...", 13, 10, 0
-dsk_err db "Failed to Read Sector 1 of disk!", 0
-boot db "Booting from Hard Disk...", 13, 10, 0
-a20 db "Enabled the A20 Gate!", 13, 10, 0
-gdt db "Setup the Global Descriptor Table!", 13, 10, 0
+mmap db "Memory Map OK!", 13, 10, 0
+read_disk_msg db "Disk OK!", 13, 10, 0
+pm db "PM...Kernel loaded..", 13, 10, 0
+dsk_err db "Failed to read disk!", 0
+a20 db "A20 Enabled!", 13, 10, 0
+gdt db "GDT Done!", 13, 10, 0
 
 times 510 - ($ - $$) db 0
 dw 0xaa55
