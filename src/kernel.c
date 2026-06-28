@@ -92,6 +92,24 @@ void vga_puts(const char* str)
 	}
 }
 
+void vga_put_num(u32 num)
+{
+	if (num == 0)
+	{
+		vga_put_c('0');
+		return;
+	}
+	char buf[12];
+	int i = 10;
+	buf[11] = '\0';
+	while (num > 0 && i >= 0)
+	{
+		buf[i--] = (num % 10) + '0';
+		num /= 10;
+	}
+	vga_puts(&buf[i + 1]);
+}
+
 //this method remaps the entries since long ago the PIC and Exceptions collide...
 //...so this maps the PIC IRQs at different addresses from the CPU Exceptions
 // Small delay for I/O operations
@@ -842,6 +860,21 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 
 							lines_printed++;
 						}
+					} else if (strcmp(shell_buffer, "mem") == 0){
+						u64 total_usable_memory_bytes = 0;
+					
+					    for (u32 i = 0; i < memory_entries_count; i++) {
+					        if (mmap_entries[i].type == 1) {
+					            total_usable_memory_bytes += mmap_entries[i].length;
+					        }
+					    }
+									
+					    u32 total_mb = (u32)(total_usable_memory_bytes / 1024 / 1024);
+					
+					    vga_puts("Total Usable Physical RAM: ");
+					    
+					    vga_put_num(total_mb); 
+					    vga_puts(" MB\n");	
 					} else if (strcmp(shell_buffer, "sleep") == 0 ){
 						vga_puts("Sleeping for 2 Seconds\n");
 						sleep(2000);
