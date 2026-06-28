@@ -174,7 +174,7 @@ typedef struct {
     u32 address;         // Address of IDT array
 } __attribute__((packed)) IDTR;
 
-typedef struct 
+typedef struct
 {
 	u64 base_address;
 	u64 length;
@@ -772,13 +772,15 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
     vga_puts("Welcome to the BIKT_OS CLI(Command Line Interface)\n");
     vga_puts("Type 'help' foe a list of helpful commands\n");
 
-    vga_puts("######   \n");
-	vga_puts("#     #  \n");
-	vga_puts("#     #  \n");
-	vga_puts("######   \n");
-	vga_puts("#     #  \n");
-	vga_puts("#     #  \n");
-	vga_puts("######   \n\n");
+    vga_puts("===========\n");
+    vga_puts("||        \\\n");
+    vga_puts("||         ||\n");
+    vga_puts("||        //\n");
+    vga_puts("===========\n");
+    vga_puts("||         \\\n");
+    vga_puts("||          ||\n");
+    vga_puts("||         //\n");
+    vga_puts("===========\n\n");
 
 	//initail prompt
 	vga_puts("@root:bikt_os> ");
@@ -826,7 +828,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("__________________________________\n");
 
 						u32 lines_printed = 0;
-						
+
 						for (u32 i = 0; i < memory_entries_count; ++i)
 						{
 							if (lines_printed > 0 && lines_printed % 10 == 0)
@@ -866,32 +868,34 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						}
 					} else if (strcmp(shell_buffer, "mem") == 0){
 						u64 total_usable_memory_bytes = 0;
-					
+
 					    for (u32 i = 0; i < memory_entries_count; i++) {
 					        if (mmap_entries[i].type == 1) {
 					            total_usable_memory_bytes += mmap_entries[i].length;
 					        }
 					    }
-									
+
 					    u32 total_mb = (u32)(total_usable_memory_bytes / 1024 / 1024);
-					
+
 					    vga_puts("Total Usable Physical RAM: ");
-					    
-					    vga_put_num(total_mb); 
-					    vga_puts(" MB\n");	
+
+					    vga_put_num(total_mb);
+					    vga_puts(" MB\n");
 					} else if (strcmp(shell_buffer, "sleep") == 0 ){
 						vga_puts("Sleeping for 2 Seconds\n");
 						sleep(2000);
 					} else if (strcmp(shell_buffer, "fetch") == 0){
 						vga_puts("\nBIKT-OS KERNEL version 1.0.0\n");
 						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");
-						vga_puts("######   \n");
-						vga_puts("#     #  \n");
-						vga_puts("#     #  \n");
-						vga_puts("######   \n");
-						vga_puts("#     #  \n");
-						vga_puts("#     #  \n");
-						vga_puts("######   \n");
+						vga_puts("===========\n");
+						vga_puts("||        \\\n");
+						vga_puts("||         ||\n");
+						vga_puts("||        //\n");
+						vga_puts("===========\n");
+						vga_puts("||         \\\n");
+						vga_puts("||          ||\n");
+						vga_puts("||         //\n");
+						vga_puts("===========\n\n");
 					} else if (strcmp(shell_buffer, "wifi") == 0){
 						vga_puts("wifi connected\n");
 					} else if (strcmp(shell_buffer, "exit") == 0){
