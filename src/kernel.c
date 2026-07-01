@@ -15,6 +15,15 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+int strcmp(const char* s1, const char* s2);
+void vga_puts(const char* str);
+void vga_put_c(char c);
+int ata_identify_slave(void);
+void ata_read_sector(u32 lba, u8* buffer);
+void vga_put_hex(u32 num);
+void vga_put_num(u32 num);
+int fat32_init(void);
+
 typedef struct
 {
 	u64 base_address;
@@ -270,7 +279,7 @@ void* kmalloc(u32 size)
 
 				curr->next = new_block;
 				curr->size = size;
-			}	
+			}
 
 			curr->is_free = 0;
 			//hand back the pointer immediately following the metadata header
@@ -303,6 +312,466 @@ void kfree(void *ptr)
 	}
 }
 
+//Virtual File System and FAT32 Driver implementation
+
+#define _VFS_FILE 0x01
+#define _VFS_DIRECTORY 0x02
+#define _VFS_DEVICE 0x03
+
+struct vfs_node;
+
+//blueprints for file system operation pointers
+typedef u32 (*vfs_read_type)(struct vfs_node* node, u32 offset, u32 size, u8* buffer);
+typedef u32 (*vfs_write_type)(struct vfs_node* node, u32 offset, u32 size, u8* buffer);
+typedef void (*vfs_open_type)(struct vfs_node* node);
+typedef void (*vfs_close_type)(struct vfs_node* node);
+typedef struct vfs_node* (*vfs_readdir_type)(struct vfs_node* node, u32 index);
+typedef struct vfs_node* (*vfs_finddir_type)(struct vfs_node* node, const char* name);
+
+typedef struct vfs_node {
+	char name[128]; //visible string name eg. "hello.c"
+	u32 type; //flags: VFS_FILE, VFS_DIRECTORY, etc.
+	u32 size; //file size
+	u32 inode; //tracking index number
+
+	//these fields hold the addresses of our driver functions
+	vfs_read_type read;
+	vfs_write_type write;
+	vfs_open_type open;
+	vfs_close_type close;
+	vfs_readdir_type readdir;
+	vfs_finddir_type finddir;
+
+	struct vfs_node* ptr; //Mountpoint anchor tracking pointer
+} vfs_node_t;
+
+//the global anchor of our system directory tree
+static vfs_node_t *vfs_root = NULL;
+
+//VFS core API wrappers...
+u32 vfs_read(vfs_node_t *node, u32 offset, u32 size, u8 *buffer)
+{
+	if (node && node->read)
+	{
+		//execute the function adress stored inside this specific node
+		return node->read(node, offset, size, buffer);
+	}
+
+	return 0;
+}
+
+u32 vfs_write(vfs_node_t *node, u32 offset, u32 size, u8* buffer)
+{
+	if (node && node->write)
+	{
+		return node->write(node, offset, size, buffer);
+	}
+	return 0;
+}
+
+//recursively walk path components...
+vfs_node_t* vfs_find_path(vfs_node_t *root, const char *path)
+{
+	if (!root || !path || path[0] != '/') return NULL;
+	if (path[1] == '\0') return root;
+
+	char element[128];
+	u32 p_idx = 1; //skip the leading root slash
+	vfs_node_t *current_node = root;
+
+	while (path[p_idx] != '\0')
+	{
+		u32 e_idx = 0;
+		//parse out individual folder/file names between slashes
+		while (path[p_idx] != '/' && path[p_idx] != '\0')
+		{
+			if(e_idx < 127)
+			{
+				element[e_idx++] = path[p_idx];
+			}
+			p_idx++;
+		}
+		element[e_idx] = '\0';
+
+		if (path[p_idx] == '/') p_idx++;
+
+		if (current_node->finddir)
+		{
+			//ASK the current directory node to look up the parsed element string
+			current_node = current_node->finddir(current_node, element);
+			if (!current_node) return NULL; //Not found!
+		} else {
+			return NULL; //hit a file instead of a folder directory
+		}
+	}
+	return current_node;
+}
+
+//BPB
+// BIOS Parameter Block....
+typedef struct
+{
+	u8 bootjmp[3];
+	u8 oem_name[8];
+	u16 bytes_per_sector; //usually 512
+	u8 sectors_per_cluster; //power of 2 (8 sectors = 4096 byte cluster)
+	u16 reserved_sector_count; //number of reserved sectors in the reserved region
+	u8 num_fats; //almost always 2
+	u16 root_entry_count; //0 for FAT32
+	u16 total_sectors_16; //0 for FAT32
+	u8 media_type;
+	u16 fat_size_16; //0 for FAT32
+	u16 sectors_per_track;
+	u16 num_heads;
+	u32 hiden_sectors;
+	u32 total_sectors_32; //total sectors if total_sectors_16 is 0
+
+	//FAT32 extended Boot Record Header fields
+	u32 fat_size_32; //How many sectors long a single FAT table is
+	u16 ext_flags;
+	u16 fs_version;
+	u32 root_cluster; //cluster number of the root directory (usually 2)
+	u16 fs_info; //sector number of FSINFO structure
+	u16 backup_boot_sector;
+	u8 reserved[12];
+	u8 drive_number;
+	u8 nt_reserved;
+	u8 boot_signature; //0x29
+	u32 volume_id;
+	u8 volume_label[11];
+	u8 fs_type[8]; //"FAT32 "
+} __attribute__((packed)) FAT32_BPB;
+
+typedef struct
+{
+	u8 name[11]; //8 chars filename, 3 chars extension
+	u8 attr; //Attribute (0x10 = Directory, 0x20 = File, etc.)
+	u8 nt_res;
+	u8 crt_time_ten;
+	u16 crt_time;
+	u16 crt_date;
+	u16 lst_ac_date;
+	u16 first_cluster_hi; //high 16 bits of this entry's first cluster member
+	u16 wrt_time;
+	u16 wrt_data;
+	u16 wrt_date;
+	u16 first_cluster_lo; //low 16 bits of this entry's first cluster member
+	u32 file_size; //file size (in bytes)
+} __attribute__((packed)) FAT32_DirEntry;
+
+static FAT32_BPB *mounted_bpb = NULL;
+static u32 fat_start_sector = 0;
+static u32 data_start_sector = 0;
+
+static char current_working_dir[256] = "/";
+static u32 current_dir_cluster = 2; //defaultt fallback to Cluster 2, FAT32 standard root
+
+//a simple in-memory test driver
+static vfs_node_t* mock_bin_dir = NULL;
+static vfs_node_t* mock_test_file = NULL;
+
+//this function matches 'vfs_finddir_type' signature perfectly!
+vfs_node_t* mock_root_finddir(vfs_node_t* node, const char* name)
+{
+	if (strcmp(name, "bin") == 0) return mock_bin_dir;
+	return NULL;
+}
+
+//this function matches the 'vfs_finddir_type' signature perfectly!
+vfs_node_t* mock_bin_finddir(vfs_node_t* node, const char* name)
+{
+	if (strcmp(name, "hello.txt") == 0) return mock_test_file;
+	return NULL;
+}
+
+//this function matches 'vfs_read_type' signature perfectly!
+u32 mock_file_read(vfs_node_t* node, u32 offset, u32 size, u8* buffer)
+{
+	const char *text = "BIKT_OS Node System is Cooking Live!";
+	u32 len = 0;
+	while (text[len]) len++; //simple length check
+
+	if (offset >= len) return 0;
+	if (offset + size > len) size = len - offset;
+
+	//copy out the raw memory string payload
+	for (u32 i = 0; i  < size; ++i)
+	{
+		buffer[i] = (u8)text[offset + i];
+	}
+	return size;
+}
+
+void vfs_init(int mount_hardware)
+{
+	// 1. Allocate root container directory dynamically on the heap
+	vfs_root = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+	vfs_root->type = _VFS_DIRECTORY;
+
+	if (mount_hardware)
+	{
+		vga_puts("[ VFS ] - Mounting raw IDE storage system to '/'...\n");
+
+		vga_puts("[ VFS ] - Querying hardware storage systems... \n");
+
+		if (fat32_init())
+		{
+			vga_puts("[ OK ] - FAT32 Volume mapped successfully to '/' \n");
+			vfs_root->finddir = NULL; //temporary until we build fat32_finddir...
+
+			//initialize out tracking state to the actual drive's root cluster
+			current_dir_cluster = mounted_bpb->root_cluster;
+		} else {
+			vga_puts("[ ERROR ] - FAT32 initialization failed falling back to RAM LAyouts. \n");
+			mount_hardware = 0; //flip flag to trigger RAM fallback
+		}
+	}
+	else
+	{
+		vga_puts("[ VFS ] - No hardware mounted. Seeding RAM-backed file node arrays...\n");
+		vfs_root->finddir = mock_root_finddir; // Hook up memory lookups!
+
+		// 2. Allocate our virtual /bin folder
+		mock_bin_dir = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+		mock_bin_dir->type = _VFS_DIRECTORY;
+		mock_bin_dir->finddir = mock_bin_finddir;
+
+		// 3. Allocate a mock text file inside the heap area
+		mock_test_file = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
+		mock_test_file->type = _VFS_FILE;
+		mock_test_file->read = mock_file_read;
+	}
+}
+
+int fat32_init(void)
+{
+	//allocate a 512 byte buffer on the heap to store the sector data
+	u8 *sector_buffer = (u8*)kmalloc(512);
+	if (!sector_buffer)
+	{
+		vga_puts("[ FAT32 ] - Heap allocation failed for sector buffer. \n");
+		return 0;
+	}
+
+	//read sector 0 (the boot sector) from our primary slave IDE disk
+	ata_read_sector(0, sector_buffer);
+
+	//cast the raw bytes directly into our structuredBPB config
+	mounted_bpb = (FAT32_BPB*)sector_buffer;
+
+	//safety check, verify the boot signature (0xaa55)
+	u16 boot_signature = *(u16*)(sector_buffer + 510);
+	if (boot_signature != 0xAA55)
+	{
+		vga_puts("[ FAT32 ERROR ] - Invalid boot sector signature! Found: ");
+		vga_put_hex(boot_signature);
+		vga_puts("\n");
+		kfree(sector_buffer);
+		return 0;
+	}
+
+	vga_puts("[ FAT32 ] - Mounting media filesystem volumes...\n");
+	vga_puts("      OEM Label: ");
+	for (int i = 0; i < 8; ++i) vga_put_c(mounted_bpb->oem_name[i]);
+	vga_puts("\n");
+
+	//calculate core cluster offset boundaries
+	// the File Allocation Table(FAT) starts right after the reserved sectors
+	fat_start_sector = mounted_bpb->reserved_sector_count;
+
+	//the data region starts after the reserved sectors and all copies of the FAT tables
+	data_start_sector = mounted_bpb->reserved_sector_count + (mounted_bpb->num_fats * mounted_bpb->fat_size_32);
+	vga_puts("      Sectors Per Cluster: ");
+	vga_put_num(mounted_bpb->sectors_per_cluster);
+	vga_puts("\n      FAT Start Sector: ");
+	vga_put_num(fat_start_sector);
+	vga_puts("\n      Data Region Start: ");
+	vga_put_num(data_start_sector);
+	vga_puts("\n");
+
+	return 1; //successfully mounted!
+}
+
+//converts a FAT32 Cluster index into a aw logical block address sector
+u32 fat32_cluster_to_sector(u32 cluster)
+{
+	if (cluster < 2) return 0; //clusters 0 and 1 are invalid boundary tags
+	return data_start_sector + ((cluster - 2) * mounted_bpb->sectors_per_cluster);
+}
+
+//custom helper that compares normal input string (eg. "bin")
+// returns 0 on a perfect match...
+int fat32_compare_name(const char* input_name, const u8* fat_name)
+{
+	char formatted_input[11];
+	//pre-fill outr comparison buffer with standard FAT empty spaces
+	for (int i = 0; i < 11; ++i) formatted_input[i] = ' ';
+
+	int i = 0;
+	//process main file/folder name postion (up to 8 bytes)
+	while (input_name[i] != '\0' && input_name[i] != '.' && i < 8)
+	{
+		char c = input_name[i];
+		if (c >= 'a' && c <= 'z') c -= 32; //convert to upper case...
+		formatted_input[i] = c;
+		i++;
+	}
+
+	if (input_name[i] == '.')
+	{
+		i++; //skipp the '.' character
+		int ext_idx = 8;
+		while (input_name[i] != '\0' && ext_idx < 11)
+		{
+			char c = input_name[i];
+			if (c >= 'a' && c <= 'z') c -= 32;
+			formatted_input[ext_idx] = c;
+			i++;
+			ext_idx++;
+		}
+	}
+
+	//compare the raw 11 bytes completely
+	for (int idx = 0;  idx < 11; idx++)
+	{
+		if (formatted_input[idx] != fat_name[idx])
+		{
+			return 1; //msimatch encountered
+		}
+	}
+	return 0; //perfect match found!
+}
+
+//command: ls
+void cmd_ls(u32 target_cluster)
+{
+	if (mounted_bpb == NULL)
+	{
+		vga_puts(" bin/"); //fallback to mock if hardware not mounted
+		return;
+	}
+
+	u32 sector = fat32_cluster_to_sector(target_cluster);
+	u8* buffer = (u8*)kmalloc(512);
+	if (!buffer) return;
+
+	ata_read_sector(sector, buffer);
+	FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
+
+	//loop through 16 available 32-byte directory entry records in this 512 byte sector
+	for (int i = 0; i < 16; ++i)
+	{
+		if (entries[i].name[0] == 0x00) break; //EOD(End Of Directory) stream mark
+		if (entries[i].name[0] == 0xE5) continue; //deleted entry skip
+		if (entries[i].attr == 0x0F) continue; //long file name helper metadeata skip
+
+		vga_puts(" ");
+		//print main name(8 chars max)
+		for (int c = 0; c < 8; c++)
+		{
+			if (entries[i].name[c] != ' ') vga_put_c(entries[i].name[c]);
+		}
+
+		//if it is a directory attribute (0x10 flag)
+		if (entries[i].attr & 0x10)
+		{
+			vga_puts("/");
+		} else { //it's a file and append its dot extension
+			vga_puts(".");
+			for (int c = 8; c < 11; c++)
+			{
+				if (entries[i].name[c] != ' ') vga_put_c(entries[i].name[c]);
+			}
+			vga_puts("   (");
+			vga_put_num(entries[i].file_size);
+			vga_puts(" bytes)");
+		}
+		vga_puts("\n");
+	}
+	kfree(buffer);
+}
+
+//Command: pwd
+void cmd_pwd(void)
+{
+	vga_puts(current_working_dir);
+	vga_puts("\n");
+}
+
+//Command: cd <folder>
+void cmd_cd(const char* target_folder)
+{
+    if (mounted_bpb == NULL)
+    {
+        vga_puts("[ ERROR ] - No physical hardware mounted to support directory switching.\n");
+        return;
+    }
+
+    // Edge case: Handle going back to root directory shortcut "cd /"
+    if (strcmp(target_folder, "/") == 0)
+    {
+        current_dir_cluster = mounted_bpb->root_cluster;
+        current_working_dir[0] = '/';
+        current_working_dir[1] = '\0';
+        return;
+    }
+
+    u32 sector = fat32_cluster_to_sector(current_dir_cluster);
+    u8 *buffer = (u8*)kmalloc(512);
+    if (!buffer) return;
+
+    ata_read_sector(sector, buffer);
+    FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
+    int found = 0;
+
+    for (int i = 0; i < 16; i++)
+    {
+        if (entries[i].name[0] == 0x00) break;
+        if (entries[i].name[0] == 0xE5) continue;
+
+        // Check if the item is a valid directory
+        if (entries[i].attr & 0x10)
+        {
+            // Use our newly constructed parser to see if the directory names align!
+            if (fat32_compare_name(target_folder, entries[i].name) == 0)
+            {
+                // Pull the 32-bit destination cluster address from high and low entry word values
+                current_dir_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
+                
+                // If we are currently at root, clear out the extra trailing slash logic
+                if (strcmp(current_working_dir, "/") == 0)
+                {
+                    current_working_dir[0] = '\0';
+                }
+
+                // Concatenate the new folder name onto our human-readable path string
+                int len = 0;
+                while (current_working_dir[len] != '\0') len++;
+                
+                int t_idx = 0;
+                while (target_folder[t_idx] != '\0' && len < 250)
+                {
+                    current_working_dir[len++] = target_folder[t_idx++];
+                }
+                current_working_dir[len++] = '/';
+                current_working_dir[len] = '\0';
+
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    if (!found)
+    {
+        vga_puts("/bin/bish: cd: no such file or directory: ");
+        vga_puts(target_folder);
+        vga_puts("\n");
+    }
+
+    kfree(buffer);
+}
+
 #define _VGA_ADDRESS 0xB8000 //vga memory address
 #define _VGA_COLS 80
 #define _VGA_ROWS 25
@@ -332,6 +801,13 @@ void outw(u16 port, u16 val) {
     __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
 }
 
+u16 inw(u16 port)
+{
+	u16 ret;
+	__asm__ volatile("inw %1, %0" : "=a"(ret) : "Nd"(port));
+	return ret;
+}
+
 int strcmp(const char* s1, const char* s2)
 {
 	while (*s1 && (*s1 == *s2))
@@ -348,6 +824,27 @@ void memset(void *dest, u8 val, u32 len)
 	while (len--)
 	{
 		*ptr++ = val;
+	}
+}
+
+void vga_scroll(void)
+{
+	u16 *vga = (u16*)_VGA_ADDRESS;
+
+	//physically shift rows 1 to 24 up by one row
+	for (int y = 0; y < _VGA_ROWS - 1; y++)
+	{
+		for (int x = 0; x < _VGA_COLS; x++)
+		{
+			vga[y * _VGA_COLS + x] = vga[(y + 1) * _VGA_COLS + x];
+		}
+	}
+
+	//clear out the very bottom row (row 24) to make it empty space
+	u16 blank_cell = (u16)' ' | ((u16)_VGA_ATTR << 8);
+	for (int x = 0; x < _VGA_COLS; x++)
+	{
+		vga[(_VGA_ROWS - 1) * _VGA_COLS + x] = blank_cell;
 	}
 }
 
@@ -369,6 +866,20 @@ void vga_put_c(char c)
 		vga_buffer[cursor_pos] = (u16)c | ((u16)_VGA_ATTR << 8);
 		cursor_pos++;
 	}
+
+	//automatic scroll check
+	if (cursor_pos >= _VGA_COLS * _VGA_ROWS)
+	{
+		vga_scroll();
+		//snap cursor bact to the very start of the very lat line
+		cursor_pos = (_VGA_ROWS - 1) * _VGA_COLS;
+	}
+
+	// Keep the physical blinking cursor locked to our tracking pointer
+	outb(0x3D4, 0x0F);
+	outb(0x3D5, (u8)(cursor_pos & 0xFF));
+	outb(0x3D4, 0x0E);
+	outb(0x3D5, (u8)((cursor_pos >> 8) & 0xFF));
 }
 
 //prints text to vga buffer
@@ -989,6 +1500,112 @@ void qemu_shutdown(void) {
     outw(0xB004, 0x2000);
 }
 
+// ATA/IDE Drive Controller Communication
+// Returns 1 if a drive is successfully identified, 0 if empty/errored
+int ata_identify_slave(void)
+{
+	// 1. Select primary slave drive (0xB0 maps to slave in primary channel)
+	outb(0x1F6, 0xB0);
+
+	// 2. Zero out sector count and LBA Parameters
+	outb(0x1F2, 0x00);
+	outb(0x1F3, 0x00);
+	outb(0x1F4, 0x00);
+	outb(0x1F5, 0x00);
+
+	// 3. Send identify command (0xEC)
+	outb(0x1F7, 0xEC);
+
+	// 4. Poll status register
+	u8 status = inb(0x1F7);
+	if (status == 0)
+	{
+		return 0; // Drive doesn't exist
+	}
+
+	// 5. Wait for BSY bit 7 to clear and DRQ(Data ReQuest) bit 3 to set
+	while ((status & 0x80) && !(status & 0x08))
+	{
+		status = inb(0x1F7);
+	}
+
+	if (status & 0x01)
+	{
+		return 0; // Drive flagged an error status
+	}
+
+	// 6. Pull the 512 byte metadata buffer via inw()
+	u16 info[256];
+	for (int i = 0; i < 256; ++i)
+	{
+		info[i] = inw(0x1F0);
+	}
+
+	vga_puts("[ HARDWARE ] - Storage device detected: ");
+
+	// Drive model description string lives across words 27 to 46
+	for (int i = 27; i <= 46; i++)
+	{
+		char high = (char)(info[i] >> 8);  // Upper byte
+		char low  = (char)(info[i] & 0xFF); // Lower byte
+
+		// ATA text standard streams characters byte-swapped
+		if (high != ' ') vga_put_c(high);
+		if (low != ' ')  vga_put_c(low);
+	}
+
+	// Extract total 28-bit LBA sectors out of words 60 and 61
+	u32 total_sectors = ((u32)info[61] << 16) | info[60];
+	vga_puts(" (");
+	vga_put_num((total_sectors * 512) / (1024 * 1024));
+	vga_puts(" MB)\n");
+
+	return 1; // Drive successfully loaded!
+}
+
+//note: LBA(Logical Block Address)
+void ata_read_sector(u32 lba, u8* buffer)
+{
+	//send the bits 24-27 of lba along with drive identifier
+	outb(0x1F6, 0xF0 | ((lba >> 24) & 0x0F));
+	outb(0x1F2, 1); //1 sector at a time...
+	//send rem lba bytes sequentially across ports
+	outb(0x1F3, (u8)lba); //bits 0-7
+	outb(0x1F4, (u8)(lba >> 8)); //bits 8-15
+	outb(0x1F5, (u8)(lba >> 16)); //bits 16-23
+
+	//fire the reaad sectors command register byte
+	outb(0x1F7, 0x20);
+
+	//poll the status register until the drive is ready with data
+	u8 status = inb(0x1F7);
+
+	//wait while drive is BSY (bit 7)
+	while (status & 0x80)
+	{
+		status = inb(0x1F7);
+	}
+
+	//check if err bit (bit 0)
+	if (status & 0x01)
+	{
+		vga_puts("[ ATA ERROR ] - Drive rejected the read command. \n");
+		return;
+	}
+
+	while (!(status & 0x08))
+	{
+		status = inb(0x1F7);
+	}
+
+	//pull 256 word (512 bytes) out of the data channel port
+	u16 *ptr = (u16*)buffer;
+	for (int i = 0; i < 256; ++i)
+	{
+		ptr[i] = inw(0x1F0);
+	}
+}
+
 #define _SHELL_BUFFER_SIZE  256
 char shell_buffer[_SHELL_BUFFER_SIZE];
 u32 shell_index = 0;
@@ -1018,42 +1635,83 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 	vga_puts("BIKT-OS KERNEL v1.0.0 (Unix Like)\n");
 	vga_puts("Copyright (c) 2026 Ugwu Rhema.\n");
 	vga_puts("\n");
-	sleep(400);
+	sleep(200);
 	vga_puts("[ OK ] - Initializing GDT and system descriptors...\n");
-	sleep(500);
+	sleep(200);
 	vga_puts("[ OK ] - Interrupt Descriptor Table (IDT) loaded.\n");
-	sleep(400);
+	sleep(200);
 	vga_puts("[ OK ] - PIC successfully remapped. Vector offsets: 0x20 / 0x28.\n");
-	sleep(600);
+	sleep(200);
 	vga_puts("[ INFO ] - Initializing peripheral driver models...\n");
 	mouse_init();
-	sleep(500);
+	sleep(200);
 	vga_puts("[ OK ] - Serial COM1 port driver active.\n");
-	sleep(400);
+	sleep(200);
 	vga_puts("[ OK ] - i8042 PS/2 Keyboard driver active.\n");
-	sleep(400);
+	sleep(200);
 	vga_puts("[ OK ] - PS/2 Mouse driver pointer subsystem active.\n");
-	sleep(800);
+	sleep(200);
 	vga_puts("[ INFO ] - Setting up Physical Memory Management (PMM). \n");
-	sleep(500);
+	sleep(200);
 	vga_puts("[ INFO ] - Memory Map active. \n");
-	sleep(400);
+	sleep(200);
 	//start up the monolithic allocator...
 	pmm_init(memory_entries_count, mmap_entries);
 	vga_puts("[ OK ] - PMM Monolithic Allocator Active. \n");
-	sleep(600);
+	sleep(200);
 	vga_puts("[ INFO ] - Constructing kernel tables and activating paging. \n");
-	sleep(500);
+	sleep(200);
 	vmm_init();
 	vga_puts("[ OK ] - Virtual Memory Manager (VMM) Active. Paging Enabled. \n");
-	sleep(400);
+	sleep(200);
 	vga_puts("[ INFO ] - Shaping out Kernel Heap Space. \n");
-	sleep(400);
+	sleep(200);
 	kheap_init(32);	//map a 128 KB initail heap space (32 pages)
 	vga_puts("[ OK ] - Kernel Heap Active (kmalloc & kfree enabled). \n");
-	sleep(800);
-	vga_puts("\nSetting of all essesntials done, Launching user session in 3 seconds...\n");
-	sleep(3000);
+	sleep(200);
+	vga_puts("[ INFO ] - Probing peripheral controller storage indexes... \n");
+	sleep(200);
+
+	int disk_detected = ata_identify_slave();
+	int use_hardware_storage = 0;
+
+	if (disk_detected)
+	{
+		while (buffer_pop() != 0);
+
+		while (inb(0x64) & 1)
+		{
+			inb(0x60);
+		}
+
+		vga_puts("Mount detected storage drive as primary storage system? (y/n): ");
+		char choice = 0;
+		while (choice == 0)
+		{
+			__asm__ volatile("hlt"); //put CPU to sleep...
+			choice = buffer_pop(); //check if a character was pushed into the buffer...
+		}
+
+		vga_put_c(choice);
+		vga_puts("\n");
+
+		if (choice == 'y' || choice == 'Y')
+		{
+			use_hardware_storage = 1;
+		}
+	} else {
+		vga_puts("[ INFO ] - No secondary hardware connected to storage ports. \n");
+		sleep(200);
+	}
+
+	vga_puts("[ INFO ] - Initializing Virtual File System tree layers. \n");
+	sleep(200);
+
+	vfs_init(use_hardware_storage);
+	sleep(200);
+
+	vga_puts("\nSetting of all essesntials done, Launching user session in 5 seconds...\n");
+	sleep(5000);
 
 
 	//CLI here broski....
@@ -1078,8 +1736,9 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
     vga_puts("===========\n\n");
 
 	//initail prompt
-	vga_puts("@root:bikt_os> ");
-	serial_puts("@root:bikt_os> ");
+	vga_puts("@root:bikt_os:");
+	vga_puts(current_working_dir);
+	vga_puts("> ");
 
 	memset(shell_buffer, 0, _SHELL_BUFFER_SIZE);
 
@@ -1103,10 +1762,10 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					{
 						vga_puts("Commands currently available: \n\n");
 						vga_puts("help| exit | whereami | fetch | clear | ping | wifi| mem\n");
-						vga_puts("mmap|whoami| alloc_test\n");
+						vga_puts("mmap| whoami| alloc_test| mock cat| ls | pwd | cd <dir>\n");
 					} else if (strcmp(shell_buffer, "clear") == 0){
 						// Quick screen clear: reset cursor and wipe VGA memory space
-                    	extern long unsigned int cursor_pos; // access your global cursor tracking
+                    	extern long unsigned int cursor_pos;
                      	cursor_pos = 0;
                       	volatile u16 *vga = (volatile u16 *)0xB8000;
                        	for (int i = 0; i < 80 * 25; i++) {
@@ -1170,18 +1829,28 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					            actual_free_blocks++;
 					        }
 					    }
-					
+
 					    u32 free_mb = actual_free_blocks / 256;
 					    u32 total_mb = max_blocks / 256;
-					
+
 					    vga_puts("PMM Stats:\n");
 					    vga_puts("  Total Tracked Address Space: ");
 					    vga_put_num(total_mb);
 					    vga_puts(" MB\n");
-					
+
 					    vga_puts("  Actual Free Usable RAM:      ");
 					    vga_put_num(free_mb);
 					    vga_puts(" MB\n");
+					} else if (strcmp(shell_buffer, "ls") == 0){
+						vga_puts("Directory listing for context: ");
+						vga_puts(current_working_dir);
+						vga_puts("\n");
+						cmd_ls(current_dir_cluster);	
+					} else if (strcmp(shell_buffer, "pwd") == 0 || strcmp(shell_buffer, "whereami") == 0){
+						cmd_pwd();	
+					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'd' && shell_buffer[2] == ' '){
+						const char* target_path = &shell_buffer[3];
+						cmd_cd(target_path);
 					} else if (strcmp(shell_buffer, "sleep") == 0 ){
 						vga_puts("Sleeping for 2 Seconds\n");
 						sleep(2000);
@@ -1232,7 +1901,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("\n");
 
 						sleep(1000);
-						
+
 						if (ptr1 && ptr2)
 						{
 							vga_puts("[ OK ] - Splitting and headers intact, freeing...\n");
@@ -1242,8 +1911,25 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						} else {
 							vga_puts("[ ERROR ] - Allocation failed! Retruned NULL. \n");
 						}
-					} else if (strcmp(shell_buffer, "whereami") == 0){
-						vga_puts("you are in root!\n");
+					} else if (strcmp(shell_buffer, "mock cat") == 0){
+						vga_puts("Resolving path /bin/hello.txt...\n");
+
+						//try to walk down the tree to find the node...
+						vfs_node_t *target_node = vfs_find_path(vfs_root, "/bin/hello.txt");
+
+						if (target_node != NULL)
+						{
+							u8 read_buffer[64];
+							for (int i = 0; i < 64; ++i) read_buffer[i] = 0;
+
+							vfs_read(target_node, 0, 60, read_buffer);
+
+							vga_puts("File content: \"");
+							vga_puts((char*)read_buffer);
+							vga_puts("\"\n");
+						} else {
+							vga_puts("[ ERROR ] - Could not track down node path. \n");
+						}
 					} else {
 						vga_puts("/bin/bish: unknown command: ");
 						vga_puts(shell_buffer);
@@ -1255,8 +1941,9 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 				memset(shell_buffer, 0, _SHELL_BUFFER_SIZE);
 				shell_index = 0;
 
-				vga_puts("\n@root:bikt_os> ");
-				serial_puts("\n@root:bikt_os> ");
+				vga_puts("\n@root:bikt_os:");
+				vga_puts(current_working_dir);
+				vga_puts("> ");
 			} else if (c == '\b'){
 				//handle backspace key...
 				if (shell_index > 0)
