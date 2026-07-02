@@ -22,7 +22,88 @@ int ata_identify_slave(void);
 void ata_read_sector(u32 lba, u8* buffer);
 void vga_put_hex(u32 num);
 void vga_put_num(u32 num);
+
+/* VFS & FAT32 Structs */
+typedef struct vfs_node vfs_node_t;
+
+typedef u32 (*vfs_read_type)(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
+typedef u32 (*vfs_write_type)(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
+typedef void (*vfs_open_type)(vfs_node_t* node);
+typedef void (*vfs_close_type)(vfs_node_t* node);
+typedef vfs_node_t* (*vfs_readdir_type)(vfs_node_t* node, u32 index);
+typedef vfs_node_t* (*vfs_finddir_type)(vfs_node_t* node, const char* name);
+
+struct vfs_node {
+	char name[128];
+	u32 type;
+	u32 size;
+	u32 inode;
+	vfs_read_type read;
+	vfs_write_type write;
+	vfs_open_type open;
+	vfs_close_type close;
+	vfs_readdir_type readdir;
+	vfs_finddir_type finddir;
+	struct vfs_node* ptr;
+};
+
+typedef struct __attribute__((packed)) {
+	u8 bootjmp[3];
+	u8 oem_name[8];
+	u16 bytes_per_sector;
+	u8 sectors_per_cluster;
+	u16 reserved_sector_count;
+	u8 num_fats;
+	u16 root_entry_count;
+	u16 total_sectors_16;
+	u8 media_type;
+	u16 fat_size_16;
+	u16 sectors_per_track;
+	u16 num_heads;
+	u32 hiden_sectors;
+	u32 total_sectors_32;
+	u32 fat_size_32;
+	u16 ext_flags;
+	u16 fs_version;
+	u32 root_cluster;
+	u16 fs_info;
+	u16 backup_boot_sector;
+	u8 reserved[12];
+	u8 drive_number;
+	u8 nt_reserved;
+	u8 boot_signature;
+	u32 volume_id;
+	u8 volume_label[11];
+	u8 fs_type[8];
+} FAT32_BPB;
+
+typedef struct __attribute__((packed)) {
+	u8 name[11];
+	u8 attr;
+	u8 nt_res;
+	u8 crt_time_ten;
+	u16 crt_time;
+	u16 crt_date;
+	u16 lst_ac_date;
+	u16 first_cluster_hi;
+	u16 wrt_time;
+	u16 wrt_date;
+	u16 first_cluster_lo;
+	u32 file_size;
+} FAT32_DirEntry;
+
+/* VFS & FAT32 Function Prototypes */
+u32 vfs_read(vfs_node_t *node, u32 offset, u32 size, u8 *buffer);
+u32 vfs_write(vfs_node_t *node, u32 offset, u32 size, u8* buffer);
+vfs_node_t* vfs_find_path(vfs_node_t *root, const char *path);
+void vfs_init(int mount_hardware);
 int fat32_init(void);
+u32 fat32_cluster_to_sector(u32 cluster);
+int fat32_compare_name(const char* input_name, const u8* fat_name);
+struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name);
+vfs_node_t* mock_root_finddir(vfs_node_t* node, const char* name);
+vfs_node_t* mock_bin_finddir(vfs_node_t* node, const char* name);
+u32 mock_file_read(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
 
 typedef struct
 {
@@ -312,38 +393,9 @@ void kfree(void *ptr)
 	}
 }
 
-//Virtual File System and FAT32 Driver implementation
-
 #define _VFS_FILE 0x01
 #define _VFS_DIRECTORY 0x02
 #define _VFS_DEVICE 0x03
-
-struct vfs_node;
-
-//blueprints for file system operation pointers
-typedef u32 (*vfs_read_type)(struct vfs_node* node, u32 offset, u32 size, u8* buffer);
-typedef u32 (*vfs_write_type)(struct vfs_node* node, u32 offset, u32 size, u8* buffer);
-typedef void (*vfs_open_type)(struct vfs_node* node);
-typedef void (*vfs_close_type)(struct vfs_node* node);
-typedef struct vfs_node* (*vfs_readdir_type)(struct vfs_node* node, u32 index);
-typedef struct vfs_node* (*vfs_finddir_type)(struct vfs_node* node, const char* name);
-
-typedef struct vfs_node {
-	char name[128]; //visible string name eg. "hello.c"
-	u32 type; //flags: VFS_FILE, VFS_DIRECTORY, etc.
-	u32 size; //file size
-	u32 inode; //tracking index number
-
-	//these fields hold the addresses of our driver functions
-	vfs_read_type read;
-	vfs_write_type write;
-	vfs_open_type open;
-	vfs_close_type close;
-	vfs_readdir_type readdir;
-	vfs_finddir_type finddir;
-
-	struct vfs_node* ptr; //Mountpoint anchor tracking pointer
-} vfs_node_t;
 
 //the global anchor of our system directory tree
 static vfs_node_t *vfs_root = NULL;
@@ -407,58 +459,6 @@ vfs_node_t* vfs_find_path(vfs_node_t *root, const char *path)
 	return current_node;
 }
 
-//BPB
-// BIOS Parameter Block....
-typedef struct
-{
-	u8 bootjmp[3];
-	u8 oem_name[8];
-	u16 bytes_per_sector; //usually 512
-	u8 sectors_per_cluster; //power of 2 (8 sectors = 4096 byte cluster)
-	u16 reserved_sector_count; //number of reserved sectors in the reserved region
-	u8 num_fats; //almost always 2
-	u16 root_entry_count; //0 for FAT32
-	u16 total_sectors_16; //0 for FAT32
-	u8 media_type;
-	u16 fat_size_16; //0 for FAT32
-	u16 sectors_per_track;
-	u16 num_heads;
-	u32 hiden_sectors;
-	u32 total_sectors_32; //total sectors if total_sectors_16 is 0
-
-	//FAT32 extended Boot Record Header fields
-	u32 fat_size_32; //How many sectors long a single FAT table is
-	u16 ext_flags;
-	u16 fs_version;
-	u32 root_cluster; //cluster number of the root directory (usually 2)
-	u16 fs_info; //sector number of FSINFO structure
-	u16 backup_boot_sector;
-	u8 reserved[12];
-	u8 drive_number;
-	u8 nt_reserved;
-	u8 boot_signature; //0x29
-	u32 volume_id;
-	u8 volume_label[11];
-	u8 fs_type[8]; //"FAT32 "
-} __attribute__((packed)) FAT32_BPB;
-
-typedef struct
-{
-	u8 name[11]; //8 chars filename, 3 chars extension
-	u8 attr; //Attribute (0x10 = Directory, 0x20 = File, etc.)
-	u8 nt_res;
-	u8 crt_time_ten;
-	u16 crt_time;
-	u16 crt_date;
-	u16 lst_ac_date;
-	u16 first_cluster_hi; //high 16 bits of this entry's first cluster member
-	u16 wrt_time;
-	u16 wrt_data;
-	u16 wrt_date;
-	u16 first_cluster_lo; //low 16 bits of this entry's first cluster member
-	u32 file_size; //file size (in bytes)
-} __attribute__((packed)) FAT32_DirEntry;
-
 static FAT32_BPB *mounted_bpb = NULL;
 static u32 fat_start_sector = 0;
 static u32 data_start_sector = 0;
@@ -517,8 +517,12 @@ void vfs_init(int mount_hardware)
 		if (fat32_init())
 		{
 			vga_puts("[ OK ] - FAT32 Volume mapped successfully to '/' \n");
-			vfs_root->finddir = NULL; //temporary until we build fat32_finddir...
+			vfs_root->type = 0x02;  //uses the real field
+			vfs_root->inode = mounted_bpb->root_cluster;
+			vfs_root->size = 0;
 
+			vfs_root->finddir = fat32_finddir;
+			
 			//initialize out tracking state to the actual drive's root cluster
 			current_dir_cluster = mounted_bpb->root_cluster;
 		} else {
@@ -642,6 +646,80 @@ int fat32_compare_name(const char* input_name, const u8* fat_name)
 	return 0; //perfect match found!
 }
 
+struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
+{
+	//ensure we are working on a directory flag (0x02)
+	if (!(dir_node->type & 0x02) || mounted_bpb == NULL) return NULL;
+
+	//inode field to hold our starting cluster address!
+	u32 cluster = dir_node->inode;
+	u32 sector = fat32_cluster_to_sector(cluster);
+
+	u8 *buffer = (u8*)kmalloc(512);
+	if (!buffer) return NULL;
+
+	ata_read_sector(sector, buffer);
+	FAT32_DirEntry* entries = (FAT32_DirEntry*)buffer;
+
+	for (int i = 0; i < 16; ++i)
+	{
+		if (entries[i].name[0] == 0x00) break; //End of directory
+		if (entries[i].name[0] == 0xE5) continue; //deleted
+		if (entries[i].attr == 0x0F) continue; //LFN entry skip
+		if (entries[i].attr & 0x08) continue; //Volume label skip
+
+		if (fat32_compare_name(name, entries[i].name) == 0)
+		{
+			// Allocate a clean VFS node structure for the found file/folder
+			struct vfs_node *child = (struct vfs_node*)kmalloc(sizeof(struct vfs_node));
+			if (!child) { kfree(buffer); return NULL; }
+
+			// Safely extract the filename out to ASCII
+			int c;
+			for (c = 0; c < 8 && entries[i].name[c] != ' '; c++)
+			{
+				child->name[c] = entries[i].name[c];
+			}
+			// If it's a file and has an extension, append the dot extension layout
+			if (!(entries[i].attr & 0x10) && entries[i].name[8] != ' ')
+			{
+				child->name[c++] = '.';
+				for (int e = 8; e < 11 && entries[i].name[e] != ' '; e++)
+				{
+					child->name[c++] = entries[i].name[e];
+				}
+			}
+			child->name[c] = '\0';
+
+			// Propagate attributes from FAT32 to VFS abstract layer
+			child->size = entries[i].file_size;
+			child->inode = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
+			
+			if (entries[i].attr & 0x10)
+			{
+				child->type = 0x02;            // Mark as Directory type flag
+				child->finddir = fat32_finddir; // Bind directory lookup recursively!
+				child->read = NULL;
+			}
+			else
+			{
+				child->type = 0x01;            // Mark as regular File type flag
+				child->finddir = NULL;
+				child->read = NULL;             // We'll map fat32_read here next!
+			}
+
+			child->write = NULL;
+			child->open = NULL;
+			child->close = NULL;
+
+			kfree(buffer);
+			return child;	
+		}
+	}
+	kfree(buffer);
+	return NULL; //not found
+}
+
 //command: ls
 void cmd_ls(u32 target_cluster)
 {
@@ -664,7 +742,7 @@ void cmd_ls(u32 target_cluster)
 		if (entries[i].name[0] == 0x00) break; //EOD(End Of Directory) stream mark
 		if (entries[i].name[0] == 0xE5) continue; //deleted entry skip
 		if (entries[i].attr == 0x0F) continue; //long file name helper metadeata skip
-
+		if (entries[i].attr & 0x08) continue; //this skipes NO-NAME labels
 		vga_puts(" ");
 		//print main name(8 chars max)
 		for (int c = 0; c < 8; c++)
@@ -729,6 +807,10 @@ void cmd_cd(const char* target_folder)
         if (entries[i].name[0] == 0x00) break;
         if (entries[i].name[0] == 0xE5) continue;
 
+        //Fix: skip the volume labels too...
+        if (entries[i].attr == 0x0F) continue;
+        if (entries[i].attr & 0x08) continue;
+        
         // Check if the item is a valid directory
         if (entries[i].attr & 0x10)
         {
