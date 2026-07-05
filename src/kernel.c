@@ -885,6 +885,11 @@ int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starti
 
 void cmd_touch(const char *filename)
 {
+	if (mounted_bpb == NULL)
+	{
+		vga_puts("[ ERROR ] - No mounted disk/drive. Cannot create file. \n");
+		return;
+	}
 	//assume you track current_dir_cluster dynamically in your shell
 	if (fat32_add_entry(current_dir_cluster, filename, 0x00, 0, 0) == 0)
 	{
