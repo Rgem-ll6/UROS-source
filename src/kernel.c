@@ -6,6 +6,7 @@
  * Thanks for using BIKT-OS!
  */
 
+//#include <ctype.h>
 #include <stdint.h>
 #include <stddef.h> //library for uint32_t and the rest...
 
@@ -20,8 +21,10 @@ void vga_puts(const char* str);
 void vga_put_c(char c);
 int ata_identify_slave(void);
 void ata_read_sector(u32 lba, u8* buffer);
+void ata_write_sector(u32 lba, u8* buffer);
 void vga_put_hex(u32 num);
 void vga_put_num(u32 num);
+void memset(void *dest, u8 val, u32 len);
 
 /* VFS & FAT32 Structs */
 typedef struct vfs_node vfs_node_t;
@@ -104,6 +107,8 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name);
 vfs_node_t* mock_root_finddir(vfs_node_t* node, const char* name);
 vfs_node_t* mock_bin_finddir(vfs_node_t* node, const char* name);
 u32 mock_file_read(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
+u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer);
+void format_fat_name(const char* src, u8* dest);
 
 typedef struct
 {
@@ -522,7 +527,7 @@ void vfs_init(int mount_hardware)
 			vfs_root->size = 0;
 
 			vfs_root->finddir = fat32_finddir;
-			
+
 			//initialize out tracking state to the actual drive's root cluster
 			current_dir_cluster = mounted_bpb->root_cluster;
 		} else {
@@ -594,6 +599,86 @@ int fat32_init(void)
 	vga_puts("\n");
 
 	return 1; //successfully mounted!
+}
+
+u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer)
+{
+	if (!node || mounted_bpb == NULL || size == 0) return 0;
+
+	//safety constraint: clamp readinf bounds file size
+	if (offset >= node->size) return 0;
+	if (offset + size > node->size) size = node->size - offset;
+
+	u32 bytes_per_cluster = mounted_bpb->sectors_per_cluster * 512;
+	u32 start_cluster = node->inode;
+
+	//skip clusters if the read offset is deeper than cluster 0
+	u32 cluster_skip = offset / bytes_per_cluster;
+	u32 current_cluster = start_cluster;
+
+	u8 *fat_sector_buffer = (u8*)kmalloc(512);
+	if (!fat_sector_buffer) return 0;
+
+	for (u32 i = 0; i < cluster_skip; ++i)
+	{
+		//compute which sector of the FAT map contains entry for current cluster
+		u32 fat_sector = fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_offset = (current_cluster * 4) % 512;
+
+		ata_read_sector(fat_sector, fat_sector_buffer);
+		current_cluster = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+
+		if (current_cluster >= 0x0FFFFFF8)
+		{
+			kfree(fat_sector_buffer);
+			return 0; //unexpected early EOF(End Of File)
+		}
+	}
+
+	//read data into the target buffer
+	u32 bytes_read = 0;
+	u32 cluster_offset = offset % bytes_per_cluster;
+	u8* cluster_buffer = (u8*)kmalloc(bytes_per_cluster);
+	if (!cluster_buffer)
+	{
+		kfree(fat_sector_buffer);
+		return 0;
+	}
+
+	while (bytes_read < size)
+	{
+		//map phyiscal storage sectors matching this data cluster
+		u32 start_sector = fat32_cluster_to_sector(current_cluster);
+
+		//read the entire cluster into a temporary struct
+		for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+		{
+			ata_read_sector(start_sector + s, cluster_buffer + (s * 512));
+		}
+
+		//how much data is gonna be copied from this cluster
+		u32 chunk_size = bytes_per_cluster - cluster_offset;
+		if (chunk_size > (size - bytes_read)) chunk_size = size - bytes_read;
+		//transfer raw data to the user space buffer
+		for (u32 i = 0; i < chunk_size; ++i)
+		{
+			buffer[bytes_read + i] = cluster_buffer[cluster_offset + i];
+		}
+
+		bytes_read += chunk_size;
+		cluster_offset = 0; //only the first clutser has original file offset
+		u32 fat_sector = fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_offset = (current_cluster * 4) % 512;
+
+		ata_read_sector(fat_sector, fat_sector_buffer);
+		current_cluster = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+
+		if (current_cluster >= 0x0FFFFFF8) break; //break out if EOF reached
+	}
+
+	kfree(cluster_buffer);
+	kfree(fat_sector_buffer);
+	return bytes_read;
 }
 
 //converts a FAT32 Cluster index into a aw logical block address sector
@@ -694,7 +779,7 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 			// Propagate attributes from FAT32 to VFS abstract layer
 			child->size = entries[i].file_size;
 			child->inode = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
-			
+
 			if (entries[i].attr & 0x10)
 			{
 				child->type = 0x02;            // Mark as Directory type flag
@@ -705,7 +790,7 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 			{
 				child->type = 0x01;            // Mark as regular File type flag
 				child->finddir = NULL;
-				child->read = NULL;             // We'll map fat32_read here next!
+				child->read = fat32_read;             // We'll map fat32_read here next!
 			}
 
 			child->write = NULL;
@@ -713,11 +798,102 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 			child->close = NULL;
 
 			kfree(buffer);
-			return child;	
+			return child;
 		}
 	}
 	kfree(buffer);
 	return NULL; //not found
+}
+
+//helper to pad/format the filename to the standard 8.3 FAT format
+// example "test.txt" becomes "TEST  TXT"
+void format_fat_name(const char* src, u8* dest)
+{
+	#define TO_UPPER(c) (((c) >= 'a' && (c) <= 'z') ? ((c) - 32) : (c)) 
+	memset(dest, ' ', 11);
+	int i = 0, j = 0;
+	while (src[i] != '\0' && src[i] != '.' && j < 8)
+	{
+		dest[j++] = TO_UPPER(src[i]);
+		i++;
+	}
+
+	if (src[i] == '.')
+	{
+		i++; //skip the '.'
+		j = 8;
+		while (src[i] && j < 11)
+		{
+			dest[j++] = TO_UPPER(src[i]);
+			i++;
+		}
+	}
+	#undef TO_UPPER
+}
+
+int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starting_cluster, u32 file_size)
+{
+	u32 bytes_per_cluster = mounted_bpb->sectors_per_cluster * 512;
+	u8* buffer = (u8*)kmalloc(bytes_per_cluster);
+
+	u32 base_sector = fat32_cluster_to_sector(dir_cluster);
+	for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+	{
+		ata_read_sector(base_sector + s, buffer + (s * 512));
+	}
+
+	FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
+	u32 max_entries = bytes_per_cluster / 32;
+	int target_slot = -1;
+
+	for (u32 i = 0; i < max_entries; ++i)
+	{
+		//found an empty or deleted slot...
+		if (entries[i].name[0] == 0x00 || entries[i].name[0] == 0xE5)
+		{
+			target_slot = i;
+			break;
+		}
+	}
+
+	if (target_slot == -1)
+	{
+		kfree(buffer);
+		return -1; //the directory is full if no free bytes are found
+	}
+
+	//populate the new directory entry...
+	FAT32_DirEntry *new_entry = &entries[target_slot];
+	format_fat_name(filename, new_entry->name);
+	new_entry->attr = attrib;
+	new_entry->first_cluster_lo = starting_cluster & 0xFFFF;
+	new_entry->first_cluster_hi = (starting_cluster >> 16) & 0xFFFF;
+	new_entry->file_size = file_size;
+	//clear timestamps / creation dates for simplicity right now
+	new_entry->nt_res = 0;
+	new_entry->crt_time_ten = 0;
+
+	//writ the updated cluster back to the disk
+	for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+	{
+		ata_write_sector(base_sector + s, buffer + (s * 512));
+	}
+
+	kfree(buffer);
+	return 0; //success
+}
+
+void cmd_touch(const char *filename)
+{
+	//assume you track current_dir_cluster dynamically in your shell
+	if (fat32_add_entry(current_dir_cluster, filename, 0x00, 0, 0) == 0)
+	{
+		vga_puts("[ SUCCESS ] - ");
+		vga_puts(filename);
+		vga_puts(" created successfully. \n");
+	} else {
+		vga_puts("[ ERROR ] - Could not create file. \n");
+	}
 }
 
 //command: ls
@@ -794,6 +970,63 @@ void cmd_cd(const char* target_folder)
         return;
     }
 
+    // Edge case: Handle going back to previous directory "cd .."
+        if (strcmp(target_folder, "..") == 0)
+        {
+            if (strcmp(current_working_dir, "/") == 0) return; // Already at root
+    
+            u32 sector = fat32_cluster_to_sector(current_dir_cluster);
+            u8 *buffer = (u8*)kmalloc(512);
+            if (!buffer) return;
+    
+            ata_read_sector(sector, buffer);
+            FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
+            int found = 0;
+    
+            for (int i = 0; i < 16; i++)
+            {
+                // FAT32 physically stores '..' starting with two dots
+                if (entries[i].name[0] == '.' && entries[i].name[1] == '.')
+                {
+                    current_dir_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
+                    
+                    // FAT32 Specification: A cluster value of 0 in the ".." entry points to the root directory
+                    if (current_dir_cluster == 0) {
+                        current_dir_cluster = mounted_bpb->root_cluster;
+                    }
+                    found = 1;
+                    break;
+                }
+            }
+            kfree(buffer);
+    
+            if (found)
+            {
+                // Rewind the current_working_dir string
+                int len = 0;
+                while (current_working_dir[len] != '\0') len++;
+    
+                // Step back from the trailing slash
+                if (len > 1 && current_working_dir[len-1] == '/') {
+                    len--; 
+                }
+                
+                // Delete characters until we hit the previous slash
+                while (len > 0 && current_working_dir[len-1] != '/') {
+                    len--;
+                }
+    
+                // Cap the string
+                if (len == 0) {
+                    current_working_dir[0] = '/';
+                    current_working_dir[1] = '\0';
+                } else {
+                    current_working_dir[len] = '\0';
+                }
+            }
+            return;
+        } 
+
     u32 sector = fat32_cluster_to_sector(current_dir_cluster);
     u8 *buffer = (u8*)kmalloc(512);
     if (!buffer) return;
@@ -810,7 +1043,7 @@ void cmd_cd(const char* target_folder)
         //Fix: skip the volume labels too...
         if (entries[i].attr == 0x0F) continue;
         if (entries[i].attr & 0x08) continue;
-        
+
         // Check if the item is a valid directory
         if (entries[i].attr & 0x10)
         {
@@ -819,17 +1052,11 @@ void cmd_cd(const char* target_folder)
             {
                 // Pull the 32-bit destination cluster address from high and low entry word values
                 current_dir_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
-                
-                // If we are currently at root, clear out the extra trailing slash logic
-                if (strcmp(current_working_dir, "/") == 0)
-                {
-                    current_working_dir[0] = '\0';
-                }
 
                 // Concatenate the new folder name onto our human-readable path string
                 int len = 0;
                 while (current_working_dir[len] != '\0') len++;
-                
+
                 int t_idx = 0;
                 while (target_folder[t_idx] != '\0' && len < 250)
                 {
@@ -1645,6 +1872,20 @@ int ata_identify_slave(void)
 	return 1; // Drive successfully loaded!
 }
 
+#define _ATA_PRIMARY_DATA 0x1F0
+#define _ATA_PRIMARY_ERR 0x1F1
+#define _ATA_PRIMARY_SECCOUNT 0x1F2
+#define _ATA_PRIMARY_LBA_LOW 0x1F3
+#define _ATA_PRIMARY_LBA_MID 0x1F4
+#define _ATA_PRIMARY_LBA_HIGH 0x1F5
+#define _ATA_PRIMARY_DRIVE 0x1F6
+#define _ATA_PRIMARY_STATUS 0x1F7
+#define _ATA_PRIMARY_COMMAND 0x1F7
+
+#define _ATA_CMD_WRITE_PIO 0x30
+#define _ATA_STATUS_BSY 0x80
+#define _ATA_STATUS_DRQ 0x08
+
 //note: LBA(Logical Block Address)
 void ata_read_sector(u32 lba, u8* buffer)
 {
@@ -1686,6 +1927,39 @@ void ata_read_sector(u32 lba, u8* buffer)
 	{
 		ptr[i] = inw(0x1F0);
 	}
+}
+
+void ata_write_sector(u32 lba, u8* buffer)
+{
+	//wait for drive to not be busy
+	while(inb(_ATA_PRIMARY_STATUS) & _ATA_STATUS_BSY);
+
+	//select the drive (Master) and pass the highest 4 bits of the LBA
+	outb(_ATA_PRIMARY_DRIVE, 0xF0 | ((lba >> 24) & 0x0F));
+
+	//send the sector count (1 sector at a time)
+	outb(_ATA_PRIMARY_SECCOUNT, 1);
+
+	//send the rest of ze LBA bytes
+	outb(_ATA_PRIMARY_LBA_LOW, (u8)lba);
+	outb(_ATA_PRIMARY_LBA_MID, (u8)(lba >> 8));
+	outb(_ATA_PRIMARY_LBA_HIGH, (u8)(lba >> 16));
+
+	//issue the write PIO command
+	outb(_ATA_PRIMARY_COMMAND, _ATA_CMD_WRITE_PIO);
+
+	while (!(inb(_ATA_PRIMARY_STATUS) & _ATA_STATUS_DRQ));
+
+	//write 256 words (512 bytes) to the data port
+	u16 *ptr = (u16*)buffer;
+	for (int i = 0; i < 256; ++i)
+	{
+		outw(_ATA_PRIMARY_DATA, ptr[i]);
+	}
+
+	//flush the cache
+	outb(_ATA_PRIMARY_COMMAND, 0xE7);
+	while (inb(_ATA_PRIMARY_STATUS) & _ATA_STATUS_BSY);
 }
 
 #define _SHELL_BUFFER_SIZE  256
@@ -1845,6 +2119,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("Commands currently available: \n\n");
 						vga_puts("help| exit | whereami | fetch | clear | ping | wifi| mem\n");
 						vga_puts("mmap| whoami| alloc_test| mock cat| ls | pwd | cd <dir>\n");
+						vga_puts("touch\n");
 					} else if (strcmp(shell_buffer, "clear") == 0){
 						// Quick screen clear: reset cursor and wipe VGA memory space
                     	extern long unsigned int cursor_pos;
@@ -1853,7 +2128,6 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
                        	for (int i = 0; i < 80 * 25; i++) {
                         	vga[i] = (u16)' ' | ((u16)0x0E << 8);
                         }
-
 					} else if (strcmp(shell_buffer, "ping") == 0){
 						vga_puts("pong!\n");
 					} else if (strcmp(shell_buffer, "whoami") == 0){
@@ -1927,9 +2201,66 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("Directory listing for context: ");
 						vga_puts(current_working_dir);
 						vga_puts("\n");
-						cmd_ls(current_dir_cluster);	
+						cmd_ls(current_dir_cluster);
+					} else if (shell_buffer[0] == 't' && shell_buffer[1] == 'o' && shell_buffer[2] == 'u' && shell_buffer[3] == 'c' && shell_buffer[4] == 'h' && shell_buffer[5] == ' '){
+						//touch command
+						const char* filename = &shell_buffer[6];
+						cmd_touch(filename);
+					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'a' && shell_buffer[2] == 't' && shell_buffer[3] == ' '){
+						//cat command
+					    const char* file_path = &shell_buffer[4];
+					
+					    // Build the absolute path for VFS
+					    char abs_path[256];
+					    int ap_idx = 0;
+					
+					    if (file_path[0] != '/') {
+					        // Prepend the current working directory string
+					        int c_idx = 0;
+					        while (current_working_dir[c_idx] != '\0') {
+					            abs_path[ap_idx++] = current_working_dir[c_idx++];
+					        }
+					        // Append the target file name
+					        int f_idx = 0;
+					        while (file_path[f_idx] != '\0') {
+					            abs_path[ap_idx++] = file_path[f_idx++];
+					        }
+					        abs_path[ap_idx] = '\0';
+					    } else {
+					        // Path is already absolute
+					        int f_idx = 0;
+					        while (file_path[f_idx] != '\0') {
+					            abs_path[ap_idx++] = file_path[f_idx++];
+					        }
+					        abs_path[ap_idx] = '\0';
+					    }
+					
+					    vga_puts("Reading path: ");
+					    vga_puts(abs_path);
+					    vga_puts("\n");
+					
+					    // Walk abstract tree node down from active VFS layout anchor
+					    struct vfs_node *target_node = vfs_find_path(vfs_root, abs_path);
+					
+					    if (target_node != NULL && target_node->type == _VFS_FILE)
+					    {
+					        // Dynamically allocate a buffer sized perfectly to the target file
+					        u8 *read_buffer = (u8*)kmalloc(target_node->size + 1);
+					        if (read_buffer)
+					        {
+					            vfs_read(target_node, 0, target_node->size, read_buffer);
+					            read_buffer[target_node->size] = '\0'; // Enforce safe layout boundaries
+					
+					            vga_puts((char*)read_buffer);
+					            vga_puts("\n");
+					            kfree(read_buffer);
+					        }
+					        kfree(target_node); // Free VFS container wrapper safely
+					    } else {
+					        vga_puts("[ ERROR ] - Could not track file node down path.\n");
+						}					
 					} else if (strcmp(shell_buffer, "pwd") == 0 || strcmp(shell_buffer, "whereami") == 0){
-						cmd_pwd();	
+						cmd_pwd();
 					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'd' && shell_buffer[2] == ' '){
 						const char* target_path = &shell_buffer[3];
 						cmd_cd(target_path);
