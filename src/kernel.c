@@ -109,6 +109,10 @@ vfs_node_t* mock_bin_finddir(vfs_node_t* node, const char* name);
 u32 mock_file_read(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
 u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer);
 void format_fat_name(const char* src, u8* dest);
+void fat32_write_fat_entry(u32 cluster, u32 value);
+u32 fat32_find_free_cluster(void);
+int fat32_create_dir(u32 parent_cluster, const char* dirname);
+int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starting_cluster, u32 file_size);
 
 typedef struct
 {
@@ -803,6 +807,120 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 	}
 	kfree(buffer);
 	return NULL; //not found
+}
+
+int fat32_create_dir(u32 parent_cluster, const char* dirname)
+{
+	if (mounted_bpb == NULL) return 0;	
+	
+	//claim ze free cluster
+	u32 new_clus = fat32_find_free_cluster();
+	if (new_clus == 0)
+	{
+		vga_puts("[ MKDIR ERROR ] - No free clusters available. \n");
+		return 0;
+	}
+
+	//mark as EOF
+	fat32_write_fat_entry(new_clus, 0x0FFFFFFF);
+
+	//clear the allocated cluster memory
+	u32 bytes_per_cluster = mounted_bpb->sectors_per_cluster * 512;
+	u8* cluster_buffer = (u8*)kmalloc(bytes_per_cluster);
+	if (!cluster_buffer) return 0;
+	memset(cluster_buffer, 0, bytes_per_cluster);
+
+	//structure the initial directory contents
+	FAT32_DirEntry *entries = (FAT32_DirEntry*)cluster_buffer;
+
+	// set up "." entry (current directory)
+	memset(entries[0].name, ' ', 11);
+	entries[0].name[0] = '.';
+	entries[0].attr = 0x10; //attribute for directory
+	entries[0].first_cluster_hi = (new_clus >> 16) & 0xFFFF;
+	entries[0].first_cluster_lo = new_clus & 0xFFFF;
+	entries[0].file_size = 0;
+
+	//setup ".." entry (previous directory)
+	memset(entries[1].name, ' ', 11);
+	entries[1].name[0] = '.';
+	entries[1].name[1] = '.';
+	entries[1].attr = 0x10;
+
+	u32 parent_target_val = (parent_cluster == mounted_bpb->root_cluster) ? 0 : parent_cluster;
+	entries[1].first_cluster_hi = (parent_target_val >> 16) & 0xFFFF;
+	entries[1].first_cluster_lo = parent_target_val & 0xFFFF;
+	entries[1].file_size = 0;
+
+	//commit these formatted entries onto the new sector
+	u32 start_sector = fat32_cluster_to_sector(new_clus);
+	for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+	{
+		ata_write_sector(start_sector + s, cluster_buffer + (s * 512));
+	}
+	kfree(cluster_buffer);
+
+	//format the name into standard 8.3 notation
+	u8 formatted_name[11];
+	format_fat_name(dirname, formatted_name);
+	
+	int status = fat32_add_entry(parent_cluster, (char*)formatted_name, 0x10, new_clus, 0);
+	return status;
+}
+
+//write new value to a specific slot in the FAT on the disk
+void fat32_write_fat_entry(u32 cluster, u32 value)
+{
+	if (mounted_bpb == NULL) return;
+
+	//each FAT entry is 4 bytes (32 bit)
+	u32 fat_sector = fat_start_sector + ((cluster * 4) / 512);
+	u32 fat_offset = (cluster * 4) % 512;
+
+	u8 *fat_sector_buffer = (u8*)kmalloc(512);
+	if (!fat_sector_buffer) return;
+
+	//read the existing sector, modify, then write back...
+	ata_read_sector(fat_sector, fat_sector_buffer);
+	*(u32*)&fat_sector_buffer[fat_offset] = (value & 0x0FFFFFFF);//FAT32 uses 28 bit
+	ata_write_sector(fat_sector, fat_sector_buffer);
+
+	kfree(fat_sector_buffer);
+}
+
+//scans the FAT area for the first cluster than contains 0x00000000
+u32 fat32_find_free_cluster(void)
+{
+	if (mounted_bpb == NULL) return 0;
+
+	u8* fat_sector_buffer = (u8*)kmalloc(512);
+	if (!fat_sector_buffer) return 0;
+
+	//calculate how many total clusters are available on the drive
+	u32 total_data_sectors = mounted_bpb->total_sectors_32 - data_start_sector;
+	u32 total_clusters = total_data_sectors / mounted_bpb->sectors_per_cluster;
+
+	//start scanning from cluster 2
+	for (u32 cluster = 2; cluster < total_clusters + 2; cluster++)
+	{
+		u32 fat_sector = fat_start_sector + ((cluster * 4) / 512);
+		u32 fat_offset = (cluster * 4) % 512;
+
+		if (fat_offset == 0 || cluster == 2)
+		{
+			ata_read_sector(fat_sector, fat_sector_buffer);
+		}
+
+		u32 entry_val = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+		if (entry_val == 0)
+		{
+			kfree(fat_sector_buffer);
+			return cluster; //bingo! found a free slot!
+		}
+	}
+	
+	kfree(fat_sector_buffer);
+	return 0; //DISK full!
 }
 
 //helper to pad/format the filename to the standard 8.3 FAT format
@@ -2202,6 +2320,24 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					    vga_puts("  Actual Free Usable RAM:      ");
 					    vga_put_num(free_mb);
 					    vga_puts(" MB\n");
+					} else if (shell_buffer[0] == 'm' && shell_buffer[1] == 'k' && shell_buffer[2] == 'd' && shell_buffer[3] == 'i' && shell_buffer[4] == 'r' && shell_buffer[5] == ' '){
+						if (shell_index == 0 || shell_buffer[5] == '\0')
+						{
+							vga_puts("Usage: mkdir <dir_name>. \n");
+						} else {
+							const char* dir_name = &shell_buffer[6];
+
+							vga_puts("Creating Directory: ");
+							vga_puts(dir_name);
+							vga_puts("... \n");
+
+							if (fat32_create_dir(current_dir_cluster, dir_name))
+							{
+								vga_puts(" Done. \n");
+							} else {
+								vga_puts(" Done. \n");
+							}
+						}
 					} else if (strcmp(shell_buffer, "ls") == 0){
 						vga_puts("Directory listing for context: ");
 						vga_puts(current_working_dir);
