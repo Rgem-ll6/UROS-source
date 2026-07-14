@@ -45,7 +45,7 @@ _start:
 	call pause2secs
 
 	call detect_memory
-	
+
 	;reading the disk and loading the...
 	;...kernel into memory
 
@@ -134,13 +134,13 @@ detect_memory:
 .mem_done:
 	popad ;as you know what this does, restore all registers
 	ret
-	
+
 read_dsksec1:
 	xor ax, ax
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 58
+	mov al, 60
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -189,7 +189,7 @@ pm_start:
 
 	push dword MEMORY_MAP_BUFFER_PTR ;argument 2: mmap ptr address
 	push dword [NUM_MEMORY_ENTRIES_PTR] ;argument 1: entries count value
-	
+
 	mov eax, KERNEL ;direct addressing mode
 	jmp eax
 

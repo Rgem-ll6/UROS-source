@@ -26,6 +26,36 @@ void vga_put_hex(u32 num);
 void vga_put_num(u32 num);
 void memset(void *dest, u8 val, u32 len);
 
+u32 string_to_int(const char* str)
+{
+	u32 result = 0;
+	u32 sign = 1; //numbers are positive by default
+
+	//skip whitespace
+	while (*str == ' ' && *str == '\t' && *str == '\n')
+	{
+		str++;
+	}
+
+	//handle sign
+	if (*str == '-')
+	{
+		sign = -1;
+		str++;
+	} else if (*str == '+'){
+		str++;
+	}
+
+	//main conversion
+	while (*str >= '0' && *str <= '9')
+	{
+		result = result * 10 + (*str - '0');
+		str++;
+	}
+
+	return result * sign;
+}
+
 /* VFS & FAT32 Structs */
 typedef struct vfs_node vfs_node_t;
 
@@ -95,6 +125,30 @@ typedef struct __attribute__((packed)) {
 	u32 file_size;
 } FAT32_DirEntry;
 
+typedef struct
+{
+	u8 bootable; //0x80 = active boot partition, 0x00 = inactive
+	u8 start_head;
+	u8 start_sec : 6;
+	u16 start_cyl : 10; //packed CHS geometrics
+	u8 part_type; //0x0B or 0x0C for FAT32
+	u8 end_head;
+	u8 end_sec : 6;
+	u16 end_cyl : 10;
+	u32 lba_start; //crucial: the absolute starting sector address on disk!
+	u32 num_sectors; //total sector count of this partition volume
+} __attribute__((packed)) MBR_PartitionEntry;
+
+typedef struct
+{
+	u8 bootstrap[446]; //core assembly master boot bootstrap code area
+	MBR_PartitionEntry partitions[4];
+	u16 boot_signature; //you know the usual 0xAA55...
+} __attribute__((packed)) MBR_Sector;
+
+//global tracking register to store where our fat32 volume actually begins
+static u32 partition_offset = 0;
+
 /* VFS & FAT32 Function Prototypes */
 u32 vfs_read(vfs_node_t *node, u32 offset, u32 size, u8 *buffer);
 u32 vfs_write(vfs_node_t *node, u32 offset, u32 size, u8* buffer);
@@ -108,6 +162,7 @@ vfs_node_t* mock_root_finddir(vfs_node_t* node, const char* name);
 vfs_node_t* mock_bin_finddir(vfs_node_t* node, const char* name);
 u32 mock_file_read(vfs_node_t* node, u32 offset, u32 size, u8* buffer);
 u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer);
+u32 fat32_write(struct vfs_node *node, u32 offset, u32 size, u8 *buffer);
 void format_fat_name(const char* src, u8* dest);
 void fat32_write_fat_entry(u32 cluster, u32 value);
 u32 fat32_find_free_cluster(void);
@@ -421,6 +476,7 @@ u32 vfs_read(vfs_node_t *node, u32 offset, u32 size, u8 *buffer)
 	return 0;
 }
 
+//is this correctly implemented?
 u32 vfs_write(vfs_node_t *node, u32 offset, u32 size, u8* buffer)
 {
 	if (node && node->write)
@@ -529,9 +585,9 @@ void vfs_init(int mount_hardware)
 			vfs_root->type = 0x02;  //uses the real field
 			vfs_root->inode = mounted_bpb->root_cluster;
 			vfs_root->size = 0;
-
 			vfs_root->finddir = fat32_finddir;
-
+			vfs_root->write = fat32_write;
+			
 			//initialize out tracking state to the actual drive's root cluster
 			current_dir_cluster = mounted_bpb->root_cluster;
 		} else {
@@ -569,16 +625,64 @@ int fat32_init(void)
 	//read sector 0 (the boot sector) from our primary slave IDE disk
 	ata_read_sector(0, sector_buffer);
 
-	//cast the raw bytes directly into our structuredBPB config
-	mounted_bpb = (FAT32_BPB*)sector_buffer;
-
 	//safety check, verify the boot signature (0xaa55)
 	u16 boot_signature = *(u16*)(sector_buffer + 510);
 	if (boot_signature != 0xAA55)
 	{
-		vga_puts("[ FAT32 ERROR ] - Invalid boot sector signature! Found: ");
+		vga_puts("[ FAT32 ERROR ] - Sector 0 boot signature invalid, Found: ");
 		vga_put_hex(boot_signature);
 		vga_puts("\n");
+		kfree(sector_buffer);
+		return 0;
+	}
+
+	//detect idf sector 0 is an MBR or directly the VBR(Volume Boot Record)
+	//valid FAT filesystems always begin with an assembly jump instruction (0xEB or 0xE9)
+	u8 first_byte = sector_buffer[0];
+	u32 target_sector = 0;
+
+	if (first_byte != 0xEB && first_byte != 0xE9)
+	{
+		vga_puts("[ MBR ] - Partition Table structure detected inside Sector 0. \n");
+		MBR_Sector *mbr = (MBR_Sector*)sector_buffer;
+		int found_partition = 0;
+
+		for (int i = 0; i < 4; i++)
+		{
+			//check fot FAT32 Type Identifiers (0x0B = CHS, 0x0C = LBS mapped)
+			if (mbr->partitions[i].part_type == 0x0B || mbr->partitions[i].part_type == 0x0C)
+			{
+				target_sector = mbr->partitions[i].lba_start;
+				vga_puts("      Found valid FAT32 partition at LBA Sector: ");
+				vga_put_num(target_sector);
+				vga_puts("\n");
+				found_partition = 1;
+				break;
+			}
+		}
+
+		if (!found_partition)
+		{
+			vga_puts("[ MBR ERROR ] - No valid FAT32 Volumes found in the partition table. \n");
+			kfree(sector_buffer);
+			return 0;
+		}
+	} else {
+		vga_puts("[ VBR ] - Flat image layout detected. Sector 0 matches a raw VBR entry directly. \n");
+		target_sector = 0;
+	}
+
+	//set our absolute volume baseline sector positioning point
+	partition_offset = target_sector;
+
+	//load the genuine filesystem descriptor block (VBR) from the computed offset
+	ata_read_sector(partition_offset, sector_buffer);
+	mounted_bpb = (FAT32_BPB*)sector_buffer;
+
+	boot_signature = *(u16*)(sector_buffer + 510);
+	if (boot_signature != 0xAA55)
+	{
+		vga_puts("[ FAT32 ERROR ] - VBR block verification signature failed! \n");
 		kfree(sector_buffer);
 		return 0;
 	}
@@ -685,6 +789,117 @@ u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer)
 	return bytes_read;
 }
 
+u32 fat32_write(struct vfs_node* node, u32 offset, u32 size, u8* buffer)
+{
+	if (!node || mounted_bpb == NULL || size == 0) return 0;
+
+	u32 bytes_per_clutser = mounted_bpb->sectors_per_cluster * 512;
+	u32 current_cluster = node->inode;
+	u32 cluster_skip = offset / bytes_per_clutser;
+	u32 last_cluster = current_cluster;
+
+	u8* fat_sector_buffer = (u8*)kmalloc(512);
+	if (!fat_sector_buffer) return 0;
+
+	//follow cluster chain to the offset location
+	for (u32 i = 0; i < cluster_skip; i++)
+	{
+		u32 fat_sector = partition_offset + fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_offset = (current_cluster * 4) % 512;
+
+		ata_read_sector(fat_sector, fat_sector_buffer);
+		last_cluster = current_cluster;
+		current_cluster = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+
+		//allocate a new cluster chain link if writing way part current allocated clusters
+		if (current_cluster >= 0x0FFFFFF8 || current_cluster == 0)
+		{
+			u32 free_cluster = fat32_find_free_cluster();
+			if (free_cluster == 0)
+			{
+				kfree(fat_sector_buffer);
+				return  0; //disk full!
+			}
+			fat32_write_fat_entry(last_cluster, free_cluster);
+			fat32_write_fat_entry(free_cluster, 0x0FFFFFFF); //mark new EOF
+			current_cluster =  free_cluster;
+		}
+	}
+
+	u32 bytes_written = 0;
+	u32 cluster_offset = offset % bytes_per_clutser;
+	u8* cluster_buffer = (u8*)kmalloc(bytes_per_clutser);
+	if (!cluster_buffer)
+	{
+			kfree(fat_sector_buffer);
+			return 0;
+	}
+
+	//2. Main byte streaming loop
+	while (bytes_written < size)
+	{
+		u32 start_sector = fat32_cluster_to_sector(current_cluster);
+
+		//read the cluster first to preserve data boundaries we aren't changing
+		for (u32 s = 0;  s < mounted_bpb->sectors_per_cluster; s++)
+		{
+			ata_read_sector(start_sector + s, cluster_buffer + (s * 512));
+		}
+
+		u32 chunk_size = bytes_per_clutser - cluster_offset;
+		if (chunk_size > (size - bytes_written))
+		{
+			chunk_size = size - bytes_written;
+		}
+
+		//pverwrite the specific window inside ze cluster buffer
+		for (u32 i = 0; i < chunk_size; i++)
+		{
+			cluster_buffer[cluster_offset + i] = buffer[bytes_written + i];
+		}
+
+		//commit full cluster data changes down to disk
+		for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+		{
+			ata_write_sector(start_sector + s, cluster_buffer + (s * 512));
+		}
+
+		bytes_written += chunk_size;
+		cluster_offset  = 0; //subsequent loops write from cluster start line
+
+		if (bytes_written < size)
+		{
+			u32 fat_sector = partition_offset + fat_start_sector + ((current_cluster * 4) / 512);
+			u32 fat_offset = (current_cluster * 4) % 512;
+
+			ata_read_sector(fat_sector, fat_sector_buffer);
+			last_cluster = current_cluster;
+			current_cluster = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+
+			//allocate next chain node if file expansion is required
+			if (current_cluster >= 0x0FFFFFF8 || current_cluster == 0)
+			{
+				u32 free_cluster = fat32_find_free_cluster();
+				if (free_cluster == 0) break; //out of memory block bounds,  write what we can
+				fat32_write_fat_entry(last_cluster, free_cluster);
+				fat32_write_fat_entry(free_cluster, 0x0FFFFFFF);
+				current_cluster = free_cluster;
+			}
+		}
+	}
+
+	//update VFS layout size trackers dynamically
+	if (offset + bytes_written > node->size)
+	{
+		node->size = offset + bytes_written;
+		//in the next logical step, we will call directory entry syncs here!
+	}
+
+	kfree(cluster_buffer);
+	kfree(fat_sector_buffer);
+	return bytes_written;
+}
+
 //converts a FAT32 Cluster index into a aw logical block address sector
 u32 fat32_cluster_to_sector(u32 cluster)
 {
@@ -789,15 +1004,16 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 				child->type = 0x02;            // Mark as Directory type flag
 				child->finddir = fat32_finddir; // Bind directory lookup recursively!
 				child->read = NULL;
+				child->write = NULL; //directories do not use raw byte writes
 			}
 			else
 			{
 				child->type = 0x01;            // Mark as regular File type flag
 				child->finddir = NULL;
 				child->read = fat32_read;             // We'll map fat32_read here next!
+				child->write = fat32_write;
 			}
-
-			child->write = NULL;
+			
 			child->open = NULL;
 			child->close = NULL;
 
@@ -811,8 +1027,8 @@ struct vfs_node *fat32_finddir(struct vfs_node *dir_node, const char* name)
 
 int fat32_create_dir(u32 parent_cluster, const char* dirname)
 {
-	if (mounted_bpb == NULL) return 0;	
-	
+	if (mounted_bpb == NULL) return 0;
+
 	//claim ze free cluster
 	u32 new_clus = fat32_find_free_cluster();
 	if (new_clus == 0)
@@ -863,7 +1079,7 @@ int fat32_create_dir(u32 parent_cluster, const char* dirname)
 	//format the name into standard 8.3 notation
 	u8 formatted_name[11];
 	format_fat_name(dirname, formatted_name);
-	
+
 	int status = fat32_add_entry(parent_cluster, (char*)formatted_name, 0x10, new_clus, 0);
 	return status;
 }
@@ -918,7 +1134,7 @@ u32 fat32_find_free_cluster(void)
 			return cluster; //bingo! found a free slot!
 		}
 	}
-	
+
 	kfree(fat_sector_buffer);
 	return 0; //DISK full!
 }
@@ -927,7 +1143,7 @@ u32 fat32_find_free_cluster(void)
 // example "test.txt" becomes "TEST  TXT"
 void format_fat_name(const char* src, u8* dest)
 {
-	#define TO_UPPER(c) (((c) >= 'a' && (c) <= 'z') ? ((c) - 32) : (c)) 
+	#define TO_UPPER(c) (((c) >= 'a' && (c) <= 'z') ? ((c) - 32) : (c))
 	memset(dest, ' ', 11);
 	int i = 0, j = 0;
 	while (src[i] != '\0' && src[i] != '.' && j < 8)
@@ -1097,22 +1313,22 @@ void cmd_cd(const char* target_folder)
         if (strcmp(target_folder, "..") == 0)
         {
             if (strcmp(current_working_dir, "/") == 0) return; // Already at root
-    
+
             u32 sector = fat32_cluster_to_sector(current_dir_cluster);
             u8 *buffer = (u8*)kmalloc(512);
             if (!buffer) return;
-    
+
             ata_read_sector(sector, buffer);
             FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
             int found = 0;
-    
+
             for (int i = 0; i < 16; i++)
             {
                 // FAT32 physically stores '..' starting with two dots
                 if (entries[i].name[0] == '.' && entries[i].name[1] == '.')
                 {
                     current_dir_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
-                    
+
                     // FAT32 Specification: A cluster value of 0 in the ".." entry points to the root directory
                     if (current_dir_cluster == 0) {
                         current_dir_cluster = mounted_bpb->root_cluster;
@@ -1122,23 +1338,23 @@ void cmd_cd(const char* target_folder)
                 }
             }
             kfree(buffer);
-    
+
             if (found)
             {
                 // Rewind the current_working_dir string
                 int len = 0;
                 while (current_working_dir[len] != '\0') len++;
-    
+
                 // Step back from the trailing slash
                 if (len > 1 && current_working_dir[len-1] == '/') {
-                    len--; 
+                    len--;
                 }
-                
+
                 // Delete characters until we hit the previous slash
                 while (len > 0 && current_working_dir[len-1] != '/') {
                     len--;
                 }
-    
+
                 // Cap the string
                 if (len == 0) {
                     current_working_dir[0] = '/';
@@ -1148,7 +1364,7 @@ void cmd_cd(const char* target_folder)
                 }
             }
             return;
-        } 
+        }
 
     u32 sector = fat32_cluster_to_sector(current_dir_cluster);
     u8 *buffer = (u8*)kmalloc(512);
@@ -2350,11 +2566,11 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'a' && shell_buffer[2] == 't' && shell_buffer[3] == ' '){
 						//cat command
 					    const char* file_path = &shell_buffer[4];
-					
+
 					    // Build the absolute path for VFS
 					    char abs_path[256];
 					    int ap_idx = 0;
-					
+
 					    if (file_path[0] != '/') {
 					        // Prepend the current working directory string
 					        int c_idx = 0;
@@ -2375,14 +2591,14 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					        }
 					        abs_path[ap_idx] = '\0';
 					    }
-					
+
 					    vga_puts("Reading path: ");
 					    vga_puts(abs_path);
 					    vga_puts("\n");
-					
+
 					    // Walk abstract tree node down from active VFS layout anchor
 					    struct vfs_node *target_node = vfs_find_path(vfs_root, abs_path);
-					
+
 					    if (target_node != NULL && target_node->type == _VFS_FILE)
 					    {
 					        // Dynamically allocate a buffer sized perfectly to the target file
@@ -2391,7 +2607,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					        {
 					            vfs_read(target_node, 0, target_node->size, read_buffer);
 					            read_buffer[target_node->size] = '\0'; // Enforce safe layout boundaries
-					
+
 					            vga_puts((char*)read_buffer);
 					            vga_puts("\n");
 					            kfree(read_buffer);
@@ -2399,15 +2615,24 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 					        kfree(target_node); // Free VFS container wrapper safely
 					    } else {
 					        vga_puts("[ ERROR ] - Could not track file node down path.\n");
-						}					
+						}
 					} else if (strcmp(shell_buffer, "pwd") == 0 || strcmp(shell_buffer, "whereami") == 0){
 						cmd_pwd();
 					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'd' && shell_buffer[2] == ' '){
 						const char* target_path = &shell_buffer[3];
 						cmd_cd(target_path);
-					} else if (strcmp(shell_buffer, "sleep") == 0 ){
-						vga_puts("Sleeping for 2 Seconds\n");
-						sleep(2000);
+					} else if (shell_buffer[0] == 's' && shell_buffer[1] == 'l' && shell_buffer[2] == 'e' && shell_buffer[3] == 'e' && shell_buffer[4] == 'p' && shell_buffer[5] == ' '){
+						char *t_milliseconds = &shell_buffer[6];
+						u32 milliseconds = string_to_int(t_milliseconds);
+						vga_puts("Sleeping for ");
+						vga_put_num(milliseconds / 1000);
+						vga_puts(" seconds...\n");
+						sleep(milliseconds);
+					} else if (shell_buffer[0] == 'e' && shell_buffer[1] == 'c' && shell_buffer[2] == 'h' && shell_buffer[3] == 'o' && shell_buffer[4] == ' '){
+						if (shell_buffer[5] == '\0') vga_puts("Usage: echo <text>\n");
+						const char* string  = &shell_buffer[5];
+						vga_puts(string);
+						vga_puts("\n");
 					} else if (strcmp(shell_buffer, "fetch") == 0){
 						vga_puts("\nBIKT-OS KERNEL version 1.0.0\n");
 						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");
