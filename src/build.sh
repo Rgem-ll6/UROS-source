@@ -1,1 +1,1 @@
-qemu-system-i386 -drive format=raw,file=Bikt_OS.img,index=0,media=disk -drive format=raw,file=guest_bikt.img,index=1,media=disk -boot order=c,menu=on -m 3584M -smp 2 -usb -usbdevice tablet -serial stdio -no-reboot -enable-kvm -display gtk
+qemu-system-i386 -drive format=raw,file=Bikt_OS.img,index=0,media=disk -drive format=raw,file=guest_bikt.img,index=1,media=disk -boot order=c,menu=on -m 4G -smp 2 -usb -usbdevice tablet -serial stdio -no-reboot -enable-kvm -display gtk
