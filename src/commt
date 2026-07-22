@@ -1,5 +1,4 @@
 #!/bin/bash
 
-# Automatically add everything and commit with a timestamp
 git add .
 git commit -m "Auto-backup: $(date '+%Y-%m-%d %H:%M:%S')"
