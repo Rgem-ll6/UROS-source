@@ -168,6 +168,7 @@ void fat32_write_fat_entry(u32 cluster, u32 value);
 u32 fat32_find_free_cluster(void);
 int fat32_create_dir(u32 parent_cluster, const char* dirname);
 int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starting_cluster, u32 file_size);
+void fat32_sync_directory_metadata(vfs_node_t *file_node, u32 parent_dir_cluster, u32 newsize, u32 first_cluster);
 
 typedef struct
 {
@@ -798,6 +799,17 @@ u32 fat32_write(struct vfs_node* node, u32 offset, u32 size, u8* buffer)
 	u32 cluster_skip = offset / bytes_per_clutser;
 	u32 last_cluster = current_cluster;
 
+    if (node->inode == 0)
+    {
+        u32 first_cluster = fat32_find_free_cluster();
+        if (first_cluster == 0) return 0; //ze memory has been uh expended
+        
+        fat32_write_fat_entry(first_cluster, 0x0FFFFFFF); //Mark EOF
+        node->inode = first_cluster;
+
+        //sync...
+    }
+
 	u8* fat_sector_buffer = (u8*)kmalloc(512);
 	if (!fat_sector_buffer) return 0;
 
@@ -1215,6 +1227,40 @@ int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starti
 
 	kfree(buffer);
 	return 0; //success
+}
+
+void fat32_sync_directory_metadata(vfs_node_t *file_node, u32 parent_dir_cluster, u32 newsize, u32 first_cluster)
+{
+    u8 *sector_buffer = (u8*)kmalloc(512);
+    if (!sector_buffer) return;
+
+    u32 dir_sector = fat32_cluster_to_sector(parent_dir_cluster);
+    FAT32_DirEntry *entries = (FAT32_DirEntry*)sector_buffer;
+
+    //standard search loops acros the directory sectors
+    for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; ++s)
+    {
+        ata_read_sector(dir_sector + s, sector_buffer);
+
+        for (int i = 0; i < 16; ++i)
+        {
+            //match based on the inode / starting cluster tag
+            u32 entry_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
+            if (entry_cluster == file_node->inode)
+            {
+                //update file size & starting cluster...
+                entries[i].file_size = newsize;
+                entries[i].first_cluster_hi = (u16)(first_cluster >> 16);
+                entries[i].first_cluster_lo = (u16)(first_cluster * 0xFFFF);
+
+                //commit back to physical disk sector
+                ata_write_sector(dir_sector + s, sector_buffer);
+                kfree(sector_buffer);
+                return;
+            }
+        }
+    }
+    kfree(sector_buffer);
 }
 
 void cmd_touch(const char *filename)
@@ -2225,6 +2271,15 @@ int ata_identify_slave(void)
 #define _ATA_STATUS_BSY 0x80
 #define _ATA_STATUS_DRQ 0x08
 
+static void ata_io_delay(void)
+{
+    //create a 400ns delay so that the CPU will have enought time to read from the status register
+    inb(0x3F6); //reading byte from these port cause a 100ns delay so...we read 4-times...
+    inb(0x3F6);
+    inb(0x3F6);
+    inb(0x3F6);
+}
+
 //note: LBA(Logical Block Address)
 void ata_read_sector(u32 lba, u8* buffer)
 {
@@ -2237,7 +2292,9 @@ void ata_read_sector(u32 lba, u8* buffer)
 	outb(0x1F5, (u8)(lba >> 16)); //bits 16-23
 
 	//fire the reaad sectors command register byte
-	outb(0x1F7, 0x20);
+	outb(0x1F7, 0x20); //after this read command we delay here!
+
+    ata_io_delay(); //NOT THAT CRUCIAL, BUT NEEDED!
 
 	//poll the status register until the drive is ready with data
 	u8 status = inb(0x1F7);
@@ -2252,7 +2309,8 @@ void ata_read_sector(u32 lba, u8* buffer)
 	if (status & 0x01)
 	{
 		vga_puts("[ ATA ERROR ] - Drive rejected the read command. \n");
-		return;
+		vga_puts("[ ATA ERROR ] - Read failed! \n");
+        return;
 	}
 
 	while (!(status & 0x08))
@@ -2647,7 +2705,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("===========\n\n");
 					} else if (strcmp(shell_buffer, "wifi") == 0){
 						vga_puts("wifi connected\n");
-					} else if (strcmp(shell_buffer, "exit") == 0){
+					} else if (strcmp(shell_buffer, "exit") == 0 || strcmp(shell_buffer, "poweroff") == 0){
 						vga_puts("Shutting down BIKT-OS safely...\n");
 						serial_puts("Shutdown command executed via CLI. Halting system.\n");
 
@@ -2664,7 +2722,14 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						while(1) {
 							__asm__ volatile("hlt"); // Put CPU into deep sleep forever
 						}
-					} else if (strcmp(shell_buffer, "alloc-test") == 0){
+					} else if (strcmp(shell_buffer, "vm reboot") == 0){
+                        vga_puts("\nRESTARTING...\n");
+                        sleep(2000);
+                        outb(0x64, 0xFE);
+                    } else if (strcmp(shell_buffer, "cd") == 0){
+                        vga_puts("cd: Wrong Usage\n");
+                        vga_puts("usage: cd <directory>\n");
+                    } else if (strcmp(shell_buffer, "alloc-test") == 0){
 						vga_puts("Testing Heap...Allocating Memory blocks:\n");
 						sleep(1000);
 
@@ -2732,6 +2797,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 
 					//trigger visual backspace deletion on VGA
 					vga_put_c('\b');
+                    serial_put_c('\b');
 				}
 			} else {
 				//handle regular characters...
