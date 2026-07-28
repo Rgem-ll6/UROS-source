@@ -10,7 +10,7 @@ start:
 	jmp _start
 	nop
 
-times 33 db 0
+times 33 db 0       ;BPB(BIOS PARAMETER BLOCK) reservation space
 
 _start:
 	cli
@@ -20,10 +20,10 @@ _start:
 	mov ss, ax
 	mov sp, 0x6000
 
+    mov [boot_drive], dl
+
 	mov ax, 0x0003
 	int 0x10
-
-	call pause2secs
 
 	mov si, msg
 	call print_string
@@ -34,17 +34,8 @@ _start:
 
 	call enable_a20
 
-	mov si, a20
-	call print_string
-
-	call pause2secs
-
-	mov si, mmap
-	call print_string
-
-	call pause2secs
-
-	call detect_memory
+    ;detect RAM via BIOS
+    call detect_memory
 
 	;reading the disk and loading the...
 	;...kernel into memory
@@ -52,34 +43,56 @@ _start:
 	call read_dsksec1
 
 	mov al, 'D'
-	mov dx, 0x3f8
-	out dx, al
+	call send_serial
+
+    ;interactive Boot Prompt
+    mov si, msg_prompt
+    call print_string
+
+.wait_key:
+    sti     ;enable interrupts so keyboard input registers
+    mov ah, 0x00
+    int 0x16        ;wait for key press (Al = ASCII char)
+    cli     ;Disbale interrupts again
+
+    ;Check for 'B' or 'b' -> boot
+    cmp al, 'b'
+    je .do_boot
+    cmp al, 'B'
+    je .do_boot
+
+    ;Ckeck for 'S' or 's' -> shutdown
+    cmp al, 's'
+    je .do_shutdown
+    cmp al, 'S'
+    je .do_shutdown
+
+    jmp .wait_key
+
+.do_shutdown:
+    mov ax, 0x530e
+    xor bx, bx
+    mov cx, 0x0102
+    int 0x15
+    mov ax, 0x5307
+    mov bx, 0x0001
+    mov cx, 0x0003
+    int 0x15
+
+    ; fallback if APM is unsupported by BIOS
+    cli
+    hlt
+    jmp $-2
 
 	;call pause2secs
-
-	mov si, read_disk_msg
-	call print_string
-
+.do_boot:
 	lgdt [gdt_descriptor]
 
-	call pause2secs
-
-	mov si, gdt
-	call print_string
-
 	mov al, 'G'
-	mov dx, 0x3f8
-	out dx, al
+    call send_serial
 
-	call pause2secs
-
-	mov si, pm
-	call print_string
-
-	call pause2secs
-
-	mov ax, 0x0003
-	int 0x10
+    mov ax, 0x0003
+    int 0x10
 
 	cli
 	mov eax, cr0
@@ -87,22 +100,6 @@ _start:
 	mov cr0, eax
 
 	jmp CODE_SEL:pm_start
-
-pause2secs:
-	push ax
-	push cx
-	push dx
-
-	mov al, 0
-	mov ah, 0x86
-	mov cx, 0x001e
-	mov dx, 0x8480
-	int 0x15
-
-	pop dx
-	pop cx
-	pop ax
-	ret
 
 NUM_MEMORY_ENTRIES_PTR equ 0x1000
 MEMORY_MAP_BUFFER_PTR equ 0x1004
@@ -135,21 +132,39 @@ detect_memory:
 	popad ;as you know what this does, restore all registers
 	ret
 
+send_serial:
+    push dx
+    push ax
+    mov ah, al
+    mov dx, 0x3fd
+.wait:
+    in al, dx
+    test al, 0x20
+    jz .wait
+    mov dx, 0x3f8
+    mov al, ah
+    out dx, al
+    pop ax
+    pop dx
+    ret
+
 read_dsksec1:
 	xor ax, ax
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 63
+	mov al, 65
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
-	mov dl, 0x80
+	mov dl, [boot_drive]
 	int 0x13
 	jc .dsk_err
 	ret
 
 .dsk_err:
+    mov si, dsk_err_msg
+    call print_string
 	cli
 	hlt
 	jmp $-2
@@ -167,7 +182,8 @@ print_string:
 
 enable_a20:
 	in al, 0x92
-	or al, 2
+	or al, 0x02
+    and al, 0xfe        ;mask out bit 0
 	out 0x92, al
 	ret
 
@@ -184,14 +200,23 @@ pm_start:
 	mov esp, ebp
 
 	mov al, 'P'
-	mov dx, 0x3f8
-	out dx, al
+	call send_serial_32
 
 	push dword MEMORY_MAP_BUFFER_PTR ;argument 2: mmap ptr address
 	push dword [NUM_MEMORY_ENTRIES_PTR] ;argument 1: entries count value
 
 	mov eax, KERNEL ;direct addressing mode
 	jmp eax
+
+send_serial_32:
+    mov dx, 0x3fd
+.waitt:
+    in al, dx
+    test al, 0x20
+    jz .waitt
+    mov dx, 0x3f8
+    out dx, al
+    ret
 
 	cli
 	hlt
@@ -225,13 +250,10 @@ gdt_descriptor:
 CODE_SEL equ 0x08
 DATA_SEL equ 0x10
 
-msg db "Welcome to BIKT OS!", 13, 10, 0
-mmap db "Memory Map OK!", 13, 10, 0
-read_disk_msg db "Disk OK!", 13, 10, 0
-pm db "PM...Kernel loaded..", 13, 10, 0
-dsk_err db "Failed to read disk!", 0
-a20 db "A20 Enabled!", 13, 10, 0
-gdt db "GDT Done!", 13, 10, 0
+boot_drive db 0
+msg db "BIKT OS Bootloader, Loading Kernel...", 13, 10, 0
+msg_prompt db "[B] to Boot or [S] to Shutdown: ", 0
+dsk_err_msg db "Disk Error!", 0
 
 times 510 - ($ - $$) db 0
 dw 0xaa55

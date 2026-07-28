@@ -44,7 +44,7 @@ qemu: $(OS_IMAGE)
 		-drive format=raw,file=$(OS_IMAGE),index=0,media=disk \
 		-drive format=raw,file=dummy.img,index=1,media=disk \
 		-boot order=c,menu=on \
-		-m 4G -smp 2 -usb -usbdevice tablet \
+		-m 1024M -smp 2 -usb -usbdevice tablet \
 		-serial stdio -enable-kvm -display gtk
 
 clean:

@@ -15,6 +15,8 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef int32_t i32;
+typedef int64_t i64;
 
 int strcmp(const char* s1, const char* s2);
 void vga_puts(const char* str);
@@ -26,13 +28,13 @@ void vga_put_hex(u32 num);
 void vga_put_num(u32 num);
 void memset(void *dest, u8 val, u32 len);
 
-u32 string_to_int(const char* str)
+i32 string_to_int(const char* str)
 {
-	u32 result = 0;
-	u32 sign = 1; //numbers are positive by default
+	i32 result = 0;
+	i32 sign = 1; //numbers are positive by default
 
 	//skip whitespace
-	while (*str == ' ' && *str == '\t' && *str == '\n')
+	while (*str == ' ' || *str == '\t' || *str == '\n')
 	{
 		str++;
 	}
@@ -310,6 +312,11 @@ void pmm_free_block(void* ptr)
 
 static u32 *kernel_page_directory = NULL;
 
+static inline void tlb_flush_single(u32 virt_addr)
+{
+    __asm__ volatile("invlpg (%0)" :: "r"(virt_addr) : "memory");
+}
+
 //maps a specific va(virtual address) to a physical frame address
 void vmm_map_page(u32 *page_dir, u32 virtual_addr, u32 physical_addr, u32 flags)
 {
@@ -337,6 +344,8 @@ void vmm_map_page(u32 *page_dir, u32 virtual_addr, u32 physical_addr, u32 flags)
 	u32 *page_table = (u32*)(page_dir[dir_index] & ~0xFFF);
 
 	page_table[table_index] = physical_addr | flags | _PAGE_PRESENT;
+
+    tlb_flush_single(virtual_addr);
 }
 
 void vmm_init()
@@ -383,28 +392,24 @@ static Header *heap_start = NULL;
 
 void kheap_init(u32 initial_pages)
 {
-	//Grab continous physical frames from our PMM allocator
-	void *phys_start = pm_alloc_block();
-	for (u32 i = 1; i < initial_pages; ++i)
-	{
-		pm_alloc_block();
-	}
+    u32 virt = _HEAP_START_ADDR;
 
-	//map those pages consecutively into vmemory
-	u32 virt = _HEAP_START_ADDR;
-	u32 phys = (u32)phys_start;
-	for (u32 i = 0; i < initial_pages; ++i)
-	{
-		vmm_map_page(kernel_page_directory, virt, phys, _PAGE_WRITE);
-		virt += _BLOCK_SIZE;
-	 	phys += _BLOCK_SIZE;
-	}
+    for (u32 i = 0; i < initial_pages; ++i)
+    {
+        void* phys = pm_alloc_block();
+        if (!phys)
+        {
+            //memory allocation failure
+            return;
+        }
+        vmm_map_page(kernel_page_directory, virt, (u32)phys, _PAGE_WRITE | _PAGE_PRESENT);
+        virt += _BLOCK_SIZE; //addvance virtual address sequentially
+    }
 
-	//init our first massive free block header...yay!!!
-	heap_start = (Header*)_HEAP_START_ADDR;
-	heap_start->next = NULL;
-	heap_start->size = (initial_pages * _BLOCK_SIZE) - sizeof(Header);
-	heap_start->is_free = 1;
+    heap_start = (Header*)_HEAP_START_ADDR;
+    heap_start->next = NULL;
+    heap_start->size = (initial_pages * _BLOCK_SIZE) - sizeof(Header);
+    heap_start->is_free = 1;
 }
 
 void* kmalloc(u32 size)
@@ -731,7 +736,7 @@ u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer)
 	for (u32 i = 0; i < cluster_skip; ++i)
 	{
 		//compute which sector of the FAT map contains entry for current cluster
-		u32 fat_sector = fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_sector = partition_offset + fat_start_sector + ((current_cluster * 4) / 512);
 		u32 fat_offset = (current_cluster * 4) % 512;
 
 		ata_read_sector(fat_sector, fat_sector_buffer);
@@ -776,7 +781,7 @@ u32 fat32_read(struct vfs_node *node, u32 offset, u32 size, u8 *buffer)
 
 		bytes_read += chunk_size;
 		cluster_offset = 0; //only the first clutser has original file offset
-		u32 fat_sector = fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_sector = partition_offset + fat_start_sector + ((current_cluster * 4) / 512);
 		u32 fat_offset = (current_cluster * 4) % 512;
 
 		ata_read_sector(fat_sector, fat_sector_buffer);
@@ -806,8 +811,7 @@ u32 fat32_write(struct vfs_node* node, u32 offset, u32 size, u8* buffer)
         
         fat32_write_fat_entry(first_cluster, 0x0FFFFFFF); //Mark EOF
         node->inode = first_cluster;
-
-        //sync...
+        current_cluster = first_cluster; //Fix: keeping current_cluster in sync
     }
 
 	u8* fat_sector_buffer = (u8*)kmalloc(512);
@@ -916,7 +920,7 @@ u32 fat32_write(struct vfs_node* node, u32 offset, u32 size, u8* buffer)
 u32 fat32_cluster_to_sector(u32 cluster)
 {
 	if (cluster < 2) return 0; //clusters 0 and 1 are invalid boundary tags
-	return data_start_sector + ((cluster - 2) * mounted_bpb->sectors_per_cluster);
+	return partition_offset + data_start_sector + ((cluster - 2) * mounted_bpb->sectors_per_cluster);
 }
 
 //custom helper that compares normal input string (eg. "bin")
@@ -1088,12 +1092,7 @@ int fat32_create_dir(u32 parent_cluster, const char* dirname)
 	}
 	kfree(cluster_buffer);
 
-	//format the name into standard 8.3 notation
-	u8 formatted_name[11];
-	format_fat_name(dirname, formatted_name);
-
-	int status = fat32_add_entry(parent_cluster, (char*)formatted_name, 0x10, new_clus, 0);
-	return status;
+	return fat32_add_entry(parent_cluster, dirname, 0x10, new_clus, 0);
 }
 
 //write new value to a specific slot in the FAT on the disk
@@ -1102,7 +1101,7 @@ void fat32_write_fat_entry(u32 cluster, u32 value)
 	if (mounted_bpb == NULL) return;
 
 	//each FAT entry is 4 bytes (32 bit)
-	u32 fat_sector = fat_start_sector + ((cluster * 4) / 512);
+	u32 fat_sector = partition_offset + fat_start_sector + ((cluster * 4) / 512);
 	u32 fat_offset = (cluster * 4) % 512;
 
 	u8 *fat_sector_buffer = (u8*)kmalloc(512);
@@ -1131,7 +1130,7 @@ u32 fat32_find_free_cluster(void)
 	//start scanning from cluster 2
 	for (u32 cluster = 2; cluster < total_clusters + 2; cluster++)
 	{
-		u32 fat_sector = fat_start_sector + ((cluster * 4) / 512);
+		u32 fat_sector = partition_offset + fat_start_sector + ((cluster * 4) / 512);
 		u32 fat_offset = (cluster * 4) % 512;
 
 		if (fat_offset == 0 || cluster == 2)
@@ -1251,7 +1250,7 @@ void fat32_sync_directory_metadata(vfs_node_t *file_node, u32 parent_dir_cluster
                 //update file size & starting cluster...
                 entries[i].file_size = newsize;
                 entries[i].first_cluster_hi = (u16)(first_cluster >> 16);
-                entries[i].first_cluster_lo = (u16)(first_cluster * 0xFFFF);
+                entries[i].first_cluster_lo = (u16)(first_cluster & 0xFFFF);
 
                 //commit back to physical disk sector
                 ata_write_sector(dir_sector + s, sector_buffer);
@@ -2440,45 +2439,45 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 
 	serial_puts("Silent core initialization successful. Booting UI...\n");
 
-	vga_puts("BIKT-OS KERNEL v1.0.0 (Unix Like)\n");
+	vga_puts("BIKT-OS KERNEL v1.0.0 (Unix Derived)\n");
 	vga_puts("Copyright (c) 2026 Ugwu Rhema.\n");
 	vga_puts("\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - Initializing GDT and system descriptors...\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - Interrupt Descriptor Table (IDT) loaded.\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - PIC successfully remapped. Vector offsets: 0x20 / 0x28.\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Initializing peripheral driver models...\n");
 	mouse_init();
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - Serial COM1 port driver active.\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - i8042 PS/2 Keyboard driver active.\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ OK ] - PS/2 Mouse driver pointer subsystem active.\n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Setting up Physical Memory Management (PMM). \n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Memory Map active. \n");
-	sleep(200);
+	sleep(100);
 	//start up the monolithic allocator...
 	pmm_init(memory_entries_count, mmap_entries);
 	vga_puts("[ OK ] - PMM Monolithic Allocator Active. \n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Constructing kernel tables and activating paging. \n");
-	sleep(200);
+	sleep(100);
 	vmm_init();
 	vga_puts("[ OK ] - Virtual Memory Manager (VMM) Active. Paging Enabled. \n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Shaping out Kernel Heap Space. \n");
-	sleep(200);
+	sleep(100);
 	kheap_init(32);	//map a 128 KB initail heap space (32 pages)
 	vga_puts("[ OK ] - Kernel Heap Active (kmalloc & kfree enabled). \n");
-	sleep(200);
+	sleep(100);
 	vga_puts("[ INFO ] - Probing peripheral controller storage indexes... \n");
-	sleep(200);
+	sleep(100);
 
 	int disk_detected = ata_identify_slave();
 	int use_hardware_storage = 0;
