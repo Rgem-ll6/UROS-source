@@ -1479,7 +1479,7 @@ void cmd_cd(const char* target_folder)
 #define _ICW1_INIT    0x11
 #define _ICW4_8086    0x01
 
-static volatile u16 *vga_buffer = (volatile u16 *)_VGA_ADDRESS;
+#define _VGA_BUFFER ((volatile u16*)_VGA_ADDRESS)
 static long unsigned int cursor_pos = 0;
 
 void pic_remap(void);
@@ -1553,11 +1553,11 @@ void vga_put_c(char c)
 		if (cursor_pos > 0)
 		{
 			cursor_pos--;
-			vga_buffer[cursor_pos] = (u16)32 | ((u16)_VGA_ATTR << 8);
+			_VGA_BUFFER[cursor_pos] = (u16)32 | ((u16)_VGA_ATTR << 8);
 		}
 	} else {
 		//print the char like that if it's not backspace or new-line...
-		vga_buffer[cursor_pos] = (u16)c | ((u16)_VGA_ATTR << 8);
+		_VGA_BUFFER[cursor_pos] = (u16)c | ((u16)_VGA_ATTR << 8);
 		cursor_pos++;
 	}
 
@@ -2363,6 +2363,61 @@ void ata_write_sector(u32 lba, u8* buffer)
 char shell_buffer[_SHELL_BUFFER_SIZE];
 u32 shell_index = 0;
 
+void cmd_fetch(void)
+{
+    // 1. Compute Uptime from PIT timer ticks (1000 Hz)
+    // Access global tick counter
+    u32 total_seconds = timer_ticks / 1000;
+    u32 minutes = total_seconds / 60;
+    u32 seconds = total_seconds % 60;
+
+    // 2. Query Physical Memory Manager (PMM) stats
+    u32 actual_free_blocks = 0;
+    for (u32 i = 0; i < max_blocks; i++) {
+        if (!bitmap_test(i)) {
+            actual_free_blocks++;
+        }
+    }
+    u32 free_mb = actual_free_blocks / 256;  // 256 blocks * 4KB = 1MB
+    u32 total_mb = max_blocks / 256;
+    u32 used_mb = (total_mb > free_mb) ? (total_mb - free_mb) : 0;
+
+    vga_puts("\n");
+    vga_puts("  ____ ___ _  _______     root@bikt_os\n");
+    vga_puts(" |  _ \\_ _| |/ /_   _|    --------------\n");
+    
+    vga_puts(" | |_) | || ' <  | |      OS: BIKT-OS v1.0.0 (x86_32 Monolithic)\n");
+    
+    vga_puts(" |  _ <| || . \\  | |      Kernel: Custom C/x86 ASM Kernel\n");
+    
+    vga_puts(" |_| \\_\\___|_|\\_\\ |_|      Uptime: ");
+    vga_put_num(minutes);
+    vga_puts("m ");
+    vga_put_num(seconds);
+    vga_puts("s\n");
+
+    vga_puts("                          Shell: bish (BIKT Shell)\n");
+
+    vga_puts("                          Display: VGA Text Mode (80x25)\n");
+
+    vga_puts("                          RAM: ");
+    vga_put_num(used_mb);
+    vga_puts(" MB / ");
+    vga_put_num(total_mb);
+    vga_puts(" MB\n");
+
+    vga_puts("                          Storage / VFS: ");
+    if (mounted_bpb != NULL) {
+        vga_puts("FAT32 Volume (Hardware)\n");
+    } else {
+        vga_puts("RAM-Backed Mock FS\n");
+    }
+
+    vga_puts("                          PWD: ");
+    vga_puts(current_working_dir);
+    vga_puts("\n\n");
+}
+
 //main kernel function
 void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 {
@@ -2692,17 +2747,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts(string);
 						vga_puts("\n");
 					} else if (strcmp(shell_buffer, "fetch") == 0){
-						vga_puts("\nBIKT-OS KERNEL version 1.0.0\n");
-						vga_puts("Shell: /bin/bish (Bikt Integrated SHell)\n");
-						vga_puts("===========\n");
-						vga_puts("||        \\\n");
-						vga_puts("||         ||\n");
-						vga_puts("||        //\n");
-						vga_puts("===========\n");
-						vga_puts("||         \\\n");
-						vga_puts("||          ||\n");
-						vga_puts("||         //\n");
-						vga_puts("===========\n\n");
+						cmd_fetch();
 					} else if (strcmp(shell_buffer, "wifi") == 0){
 						vga_puts("wifi connected\n");
 					} else if (strcmp(shell_buffer, "exit") == 0 || strcmp(shell_buffer, "poweroff") == 0){
