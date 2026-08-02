@@ -153,7 +153,7 @@ read_dsksec1:
 	mov es, ax
 	mov bx,	KERNEL
 	mov ah, 0x02
-	mov al, 65
+	mov al, 66
 	mov ch, 0x00
 	mov cl, 0x02
 	mov dh, 0x00
@@ -251,7 +251,7 @@ CODE_SEL equ 0x08
 DATA_SEL equ 0x10
 
 boot_drive db 0
-msg db "BIKT OS Bootloader, Loading Kernel...", 13, 10, 0
+msg db "UROS Bootloader, Loading Kernel...", 13, 10, 0
 msg_prompt db "[B] to Boot or [S] to Shutdown: ", 0
 dsk_err_msg db "Disk Error!", 0
 

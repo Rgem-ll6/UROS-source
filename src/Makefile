@@ -8,9 +8,9 @@ LDFLAGS = -m elf_i386 -T linker.ld
 
 BOOT_BIN    = brub.bin
 ENTRY_OBJ   = entry.o
-KERNEL_OBJ  = kernel.o
-KERNEL_ELF  = kernel.elf
-KERNEL_BIN  = kernel.bin
+KERNEL_OBJ  = uroskrnl.o
+KERNEL_ELF  = uroskrnl.elf
+KERNEL_BIN  = uroskrnl.bin
 OS_IMAGE    = Bikt_OS.img
 
 .PHONY: all qemu clean
@@ -20,10 +20,10 @@ all: $(OS_IMAGE)
 $(BOOT_BIN): boot.s
 	$(AS) -f bin $< -o $@
 
-$(ENTRY_OBJ): kernel_entry.s
+$(ENTRY_OBJ): uroskrnl_entry.s
 	$(AS) -f elf32 $< -o $@
 
-$(KERNEL_OBJ): kernel.c
+$(KERNEL_OBJ): uroskrnl.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(KERNEL_ELF): $(ENTRY_OBJ) $(KERNEL_OBJ)
@@ -42,9 +42,9 @@ $(OS_IMAGE): $(BOOT_BIN) $(KERNEL_BIN)
 qemu: $(OS_IMAGE)
 	qemu-system-i386 \
 		-drive format=raw,file=$(OS_IMAGE),index=0,media=disk \
-		-drive format=raw,file=dummy.img,index=1,media=disk \
+		-drive format=raw,file=Rhema.img,index=1,media=disk \
 		-boot order=c,menu=on \
-		-m 1024M -smp 2 -usb -usbdevice tablet \
+		-m 2560M -smp 2 -usb -usbdevice tablet \
 		-serial stdio -enable-kvm -display gtk
 
 clean:
