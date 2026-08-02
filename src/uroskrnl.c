@@ -2477,6 +2477,187 @@ void cmd_fetch(void)
     vga_puts("\n\n");
 }
 
+//text buffer, my own custom nano
+#define _EDIT_ROWS 24
+#define _EDIT_COLS 80
+#define _EDIT_BUF_SIZE (_EDIT_ROWS * _EDIT_COLS)
+#define _STATUS_ROW 24
+
+//Render bootom status bar with reverse-video attribute (Black on Light Gray)
+static void editor_draw_status(const char *filename, u32 cursor_x, u32 cursor_y)
+{
+    volatile u16 *vga = (volatile u16 *)_VGA_ADDRESS;
+    u16 status_attr = (u16)0x70 << 8;
+
+    //clear status bar line
+    for (int x = 0; x < _EDIT_COLS; x++)
+    {
+        vga[_STATUS_ROW * _EDIT_COLS + x] = (u16)' ' | status_attr;
+    }
+
+    //print Header & Filename
+    const char *hdr = "[ UROS buffer ] File: ";
+    int pos = 0;
+    while (*hdr && pos < _EDIT_COLS)
+    {
+        vga[_STATUS_ROW * _EDIT_COLS + pos] = (u16)(*hdr++) | status_attr;
+        pos++;
+    }
+    while (*filename && pos < 45)
+    {
+        vga[_STATUS_ROW * _EDIT_COLS] = (u16)(*filename++) | status_attr;
+        pos++;
+    }
+
+    //display cursor coordinates and exit command
+    const char *ctrl_msg = "ESC: Save and Exit";
+    int msg_idx = 0;
+    for (int x = 60; x < _EDIT_COLS && ctrl_msg[msg_idx]; x++)
+    {
+        vga[_STATUS_ROW * _EDIT_COLS + x] = (u16)ctrl_msg[msg_idx++] |status_attr;
+    }
+
+    //lock VGA hardware blinking cursor to edit postion
+    u32 hw_pos = cursor_y * _EDIT_COLS + cursor_x;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (u8)(hw_pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (u8)((hw_pos >> 8) & 0xFF));
+}
+
+void cmd_buffer(const char *filename) {
+    if (!filename || filename[0] == '\0') {
+        vga_puts("[ URBUFFER ERROR ] Usage: buffer <filename>\n");
+        return;
+    }
+
+    // Allocate editor working buffer on kernel heap
+    char *text_buf = (char *)kmalloc(_EDIT_BUF_SIZE);
+    if (!text_buf) {
+        vga_puts("[ URBUFFER ERROR ] Out of memory. Heap allocation failed.\n");
+        return;
+    }
+    memset(text_buf, ' ', _EDIT_BUF_SIZE);
+
+    // Clear editing space on screen (Rows 0-23)
+    volatile u16 *vga = (volatile u16 *)_VGA_ADDRESS;
+    for (int i = 0; i < _EDIT_COLS * _EDIT_ROWS; i++) {
+        vga[i] = (u16)' ' | ((u16)_VGA_ATTR << 8);
+    }
+
+    u32 cur_x = 0;
+    u32 cur_y = 0;
+
+    // Load existing file data if available via FAT32 / VFS
+    if (mounted_bpb != NULL) {
+        vfs_node_t *existing_file = fat32_finddir(vfs_root, filename);
+        if (existing_file) {
+            u32 read_bytes = fat32_read(existing_file, 0, _EDIT_BUF_SIZE, (u8 *)text_buf);
+            
+            // Render loaded content into VGA memory
+            u32 r_x = 0, r_y = 0;
+            for (u32 i = 0; i < read_bytes; i++) {
+                char ch = text_buf[i];
+                if (ch == '\n') {
+                    r_y++;
+                    r_x = 0;
+                } else {
+                    vga[r_y * _EDIT_COLS + r_x] = (u16)ch | ((u16)_VGA_ATTR << 8);
+                    r_x++;
+                    if (r_x >= _EDIT_COLS) { r_x = 0; r_y++; }
+                }
+                if (r_y >= _EDIT_ROWS) break;
+            }
+            kfree(existing_file);
+        }
+    }
+
+    editor_draw_status(filename, cur_x, cur_y);
+
+    int editing = 1;
+    while (editing) {
+        char c = buffer_pop();
+
+        if (c == 0) {
+            __asm__ volatile("hlt"); // Put CPU into low-power sleep while waiting for IRQ1
+            continue;
+        }
+
+        // ESC Key (ASCII 27): Trigger Save & Exit pipeline
+        if (c == 27) {
+            editing = 0;
+            break;
+        }
+        
+        // Handle Backspace
+        else if (c == '\b') {
+            if (cur_x > 0) {
+                cur_x--;
+            } else if (cur_y > 0) {
+                cur_y--;
+                cur_x = _EDIT_COLS - 1;
+            }
+            text_buf[cur_y * _EDIT_COLS + cur_x] = ' ';
+            vga[cur_y * _EDIT_COLS + cur_x] = (u16)' ' | ((u16)_VGA_ATTR << 8);
+        }
+        
+        // Handle Enter Key
+        else if (c == '\n') {
+            if (cur_y < _EDIT_ROWS - 1) {
+                cur_y++;
+                cur_x = 0;
+            }
+        }
+        
+        // Handle Printable ASCII Characters
+        else if (c >= 32 && c <= 126) {
+            text_buf[cur_y * _EDIT_COLS + cur_x] = c;
+            vga[cur_y * _EDIT_COLS + cur_x] = (u16)c | ((u16)_VGA_ATTR << 8);
+
+            cur_x++;
+            if (cur_x >= _EDIT_COLS) {
+                cur_x = 0;
+                if (cur_y < _EDIT_ROWS - 1) {
+                    cur_y++;
+                }
+            }
+        }
+
+        editor_draw_status(filename, cur_x, cur_y);
+    }
+
+    // --- FAT32 Persistent Write back ---
+    if (mounted_bpb != NULL) {
+        // Compute actual payload size ignoring trailing whitespace
+        u32 payload_len = _EDIT_BUF_SIZE;
+        while (payload_len > 0 && text_buf[payload_len - 1] == ' ') {
+            payload_len--;
+        }
+
+        // Create file directory record if it does not exist
+        fat32_add_entry(current_dir_cluster, filename, 0x00, 0, 0);
+
+        vfs_node_t *target_node = fat32_finddir(vfs_root, filename);
+        if (target_node) {
+            fat32_write(target_node, 0, payload_len, (u8 *)text_buf);
+            kfree(target_node);
+        }
+    }
+
+    kfree(text_buf);
+
+    // Wipe VGA screen and restore bish prompt state
+    extern long unsigned int cursor_pos;
+    cursor_pos = 0;
+    for (int i = 0; i < _EDIT_COLS * 25; i++) {
+        vga[i] = (u16)' ' | ((u16)_VGA_ATTR << 8);
+    }
+
+    vga_puts("[ URBUFFER ] File saved successfully: ");
+    vga_puts(filename);
+    vga_puts("\n\n");
+}
+
 //main kernel function
 void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 {
@@ -2623,6 +2804,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("help| exit | whereami | urfetch | clear | ping | wifi| mem\n");
 						vga_puts("mmap| whoami| alloc_test | mock cat| ls | pwd | cd <dir>\n");
 						vga_puts("touch <filename>| poweroff | vm reboot | mkdir <dirname>\n");
+                        vga_puts("buffer <filename>\n");
 					} else if (strcmp(shell_buffer, "clear") == 0){
 						// Quick screen clear: reset cursor and wipe VGA memory space
                     	extern long unsigned int cursor_pos;
@@ -2716,7 +2898,10 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
                                 vga_puts("\n");
                             }
                         }
-					} else if (strcmp(shell_buffer, "ls") == 0){
+					} else if (str_has_prefix(shell_buffer, "buffer ")){
+                        const char *filename = shell_buffer + 5;
+                        cmd_buffer(filename);
+                    } else if (strcmp(shell_buffer, "ls") == 0){
 						vga_puts("Directory listing for context: ");
 						vga_puts(current_working_dir);
 						vga_puts("\n");
