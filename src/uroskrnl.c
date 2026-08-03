@@ -340,7 +340,7 @@ static u32 *kernel_page_directory = NULL;
 
 static inline void tlb_flush_single(u32 virt_addr)
 {
-    __asm__ volatile("invlpg (%0)" :: "r"(virt_addr) : "memory");
+    __asm__ volatile("invlpg %0" :: "m"(*(char*)virt_addr));
 }
 
 //maps a specific va(virtual address) to a physical frame address
@@ -1285,26 +1285,32 @@ void fat32_sync_directory_metadata(vfs_node_t *file_node, u32 parent_dir_cluster
 {
     u8 *sector_buffer = (u8*)kmalloc(512);
     if (!sector_buffer) return;
-
+ 
     u32 dir_sector = fat32_cluster_to_sector(parent_dir_cluster);
     FAT32_DirEntry *entries = (FAT32_DirEntry*)sector_buffer;
-
+ 
     //standard search loops acros the directory sectors
     for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; ++s)
     {
         ata_read_sector(dir_sector + s, sector_buffer);
-
+ 
         for (int i = 0; i < 16; ++i)
         {
-            //match based on the inode / starting cluster tag
-            u32 entry_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
-            if (entry_cluster == file_node->inode)
+            if (entries[i].name[0] == 0x00) break; //end of directory stream for this sector
+            if (entries[i].name[0] == 0xE5) continue; //deleted entry
+ 
+            //match by NAME, not by cluster: for a brand-new file the on-disk
+            //entry still shows cluster 0 at this point (that's exactly the
+            //field we're here to update), so matching on file_node->inode
+            //can never find it - it always compares the new cluster against
+            //the old 0 that's still sitting on disk.
+            if (fat32_compare_name(file_node->name, entries[i].name) == 0)
             {
                 //update file size & starting cluster...
                 entries[i].file_size = newsize;
                 entries[i].first_cluster_hi = (u16)(first_cluster >> 16);
                 entries[i].first_cluster_lo = (u16)(first_cluster & 0xFFFF);
-
+ 
                 //commit back to physical disk sector
                 ata_write_sector(dir_sector + s, sector_buffer);
                 kfree(sector_buffer);
@@ -2006,7 +2012,7 @@ char buffer_pop(void) {
 int shift_pressed = 0;
 int caps_lock = 0;
 int ctrl_key = 0;
-
+static int is_extended = 0;
 // The index is the scan code. 0 means "no character".
 //current characters the CPU can read from the keyboard
 const char kdb_map[] = {
@@ -2018,48 +2024,59 @@ const char kdb_map[] = {
 
 __attribute__((interrupt)) void keyboard_handler(void *frame)
 {
-	u8 scancode = inb(0x60); //read from the keyboard PIC ports
+    u8 scancode = inb(0x60); // Read scancode from PS/2 port
 
-	//detect if it is a break code... (key release)
-	if (scancode & 0x80)
-	{
-		u8 release_code = scancode - 0x80;
-		if (release_code == 0x2A || release_code == 0x36) //left & right SHIFT
-		{
-			shift_pressed = 0;
-		}
-	}
+    // 1. Handle extended scancode prefix (Arrow keys, Delete, Insert, etc.)
+    if (scancode == 0xE0)
+    {
+        is_extended = 1;
+        pic_eoi(1);
+        return;
+    }
 
-	//logic if it's not a break code...
-	else {
-		if (scancode == 0x2A || scancode == 0x36) //left & right SHIFT
-		{
-			shift_pressed = 1;
-		} else if (scancode == 0x3A){
-			//caps-lock...
-			caps_lock = !caps_lock;
-		} else if (scancode == 0x0E){
-			//backspace '\b'
-			buffer_push('\b');
-		} else {
-			char c = kdb_map[scancode];
-			if (c != 0)
-			{
-				//if shift is pressed...
-				if (shift_pressed && c >= 'a' && c <= 'z')
-				{
-					//convert to upper-case...
-					c -= 32;
-				} else if (caps_lock && c >= 'a' && c <='z'){
-					//if caps_lock is pressed...
-					c -= 32;
-				}
+    // 2. Handle Break Code (Key Release: bit 7 set)
+    if (scancode & 0x80)
+    {
+        u8 release_code = scancode & 0x7F; // Strip release bit
+        if (release_code == 0x2A || release_code == 0x36) // Shift released
+        {
+            shift_pressed = 0;
+        }
+        is_extended = 0;
+    }
+    // 3. Handle Make Code (Key Press)
+    else
+    {
+        if (scancode == 0x2A || scancode == 0x36) // Shift pressed
+        {
+            shift_pressed = 1;
+        } 
+        else if (scancode == 0x3A) // Caps Lock
+        {
+            caps_lock = !caps_lock;
+        } 
+        else if (scancode == 0x0E) // Backspace
+        {
+            buffer_push('\b');
+        } 
+        // Safety Guard: Bounds check against array size & ignore extended keys
+        else if (!is_extended && scancode < sizeof(kdb_map))
+        {
+            char c = kdb_map[scancode];
+            if (c != 0)
+            {
+                // Handle shift XOR caps lock logic for lettering
+                if ((shift_pressed ^ caps_lock) && (c >= 'a' && c <= 'z'))
+                {
+                    c -= 32; // Upper case
+                }
+                buffer_push(c);
+            }
+        }
+        is_extended = 0;
+    }
 
-				buffer_push(c);
-			}
-		}
-	}
-	pic_eoi(1);
+    pic_eoi(1); // Always send End of Interrupt
 }
 
 //the COM1 port handler...
@@ -2200,7 +2217,7 @@ void idt_init(void)
 
     // Load IDT into CPU
     idt_load();
-    //__asm__("sti"); //start interrupts
+    __asm__("sti"); //start interrupts
 }
 
 //... (rest of the file)
@@ -2505,7 +2522,7 @@ static void editor_draw_status(const char *filename, u32 cursor_x, u32 cursor_y)
     }
     while (*filename && pos < 45)
     {
-        vga[_STATUS_ROW * _EDIT_COLS] = (u16)(*filename++) | status_attr;
+        vga[_STATUS_ROW * _EDIT_COLS + pos] = (u16)(*filename++) | status_attr;
         pos++;
     }
 
@@ -2661,10 +2678,10 @@ void cmd_buffer(const char *filename) {
 //main kernel function
 void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 {
-	serial_init();     // Ready the serial interface
+	serial_init();// Ready the serial interface
+	pic_remap(); //Remap PIC first
+	idt_init(); //set up IDT handlers
 	pit_init(1000);    // Configure timer ticks to 1ms
-	idt_init();        // Set up interrupt handlers silently
-	pic_remap();       // Remap PIC away from CPU exception vectors
 
 	// Unmask required hardware interrupt lines
 	outb(_PIC1_DATA, 0xF0); // Open Timer (IRQ0), Keyboard (IRQ1), COM1 (IRQ4)
@@ -2899,7 +2916,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
                             }
                         }
 					} else if (str_has_prefix(shell_buffer, "buffer ")){
-                        const char *filename = shell_buffer + 5;
+                        const char *filename = shell_buffer + 7;
                         cmd_buffer(filename);
                     } else if (strcmp(shell_buffer, "ls") == 0){
 						vga_puts("Directory listing for context: ");

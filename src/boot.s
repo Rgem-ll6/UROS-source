@@ -149,14 +149,8 @@ send_serial:
     ret
 
 read_dsksec1:
-	xor ax, ax
-	mov es, ax
-	mov bx,	KERNEL
-	mov ah, 0x02
-	mov al, 66
-	mov ch, 0x00
-	mov cl, 0x02
-	mov dh, 0x00
+    mov si, dap
+    mov ah, 0x42    ;extended (LBA) read - no CHS track/sector ceiling
 	mov dl, [boot_drive]
 	int 0x13
 	jc .dsk_err
@@ -168,6 +162,16 @@ read_dsksec1:
 	cli
 	hlt
 	jmp $-2
+
+dap:
+    db 0x10     ;packet size (16 bytes)
+    db 0    ;reserved, must be zero
+
+dap_count:
+    dw 120  ;sectors to read
+    dw KERNEL ;dest offset
+    dw 0 ;dest segment -> 0000:8000
+    dq 1 ;starting LBS (sector right after the boot sector)
 
 print_string:
 	lodsb
