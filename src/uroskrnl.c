@@ -355,7 +355,7 @@ void vmm_map_page(u32 *page_dir, u32 virtual_addr, u32 physical_addr, u32 flags)
 	{
 		//if it doesnt exist call the PMM to allocate a clear physical frame to a page table entry...
 		u32 *new_table = (u32*)pm_alloc_block();
-
+        if (!new_table) return; //or panic, or handle gracefully
 		//zero out the new brand page table
 		for (int i = 0; i < 1024; ++i)
 		{
@@ -385,8 +385,8 @@ void vmm_init()
 		kernel_page_directory[i] = 0;
 	}
 
-	//identity map the first 8MB of memory space
-	for (u32 i = 0; i < 0x800000; i += _BLOCK_SIZE)
+	//identity map the first 32 megabytes of memory space
+	for (u32 i = 0; i < 0x2000000; i += _BLOCK_SIZE)
 	{
 		vmm_map_page(kernel_page_directory, i, i, _PAGE_WRITE);
 	}
@@ -547,9 +547,13 @@ vfs_node_t* vfs_find_path(vfs_node_t *root, const char *path)
 
 		if (current_node->finddir)
 		{
-			//ASK the current directory node to look up the parsed element string
-			current_node = current_node->finddir(current_node, element);
-			if (!current_node) return NULL; //Not found!
+            vfs_node_t *next = current_node->finddir(current_node, element);
+            if (next != current_node && current_node != vfs_root)
+            {
+                kfree(current_node); //free intermediate node
+            }
+            current_node = next;
+            if (!current_node) return NULL;
 		} else {
 			return NULL; //hit a file instead of a folder directory
 		}
@@ -2350,6 +2354,10 @@ int ata_identify_slave(void)
 #define _ATA_STATUS_BSY 0x80
 #define _ATA_STATUS_DRQ 0x08
 
+#define _ATA_DRIVE_SLAVE 0xB0
+#define _ATA_DRIVE_MASTER 0xF0
+static u8 ata_drive_select = _ATA_DRIVE_MASTER;
+
 static void ata_io_delay(void)
 {
     //create a 400ns delay so that the CPU will have enought time to read from the status register
@@ -2363,7 +2371,7 @@ static void ata_io_delay(void)
 void ata_read_sector(u32 lba, u8* buffer)
 {
 	//send the bits 24-27 of lba along with drive identifier
-	outb(0x1F6, 0xF0 | ((lba >> 24) & 0x0F));
+	outb(0x1F6, ata_drive_select | ((lba >> 24) & 0x0F));
 	outb(0x1F2, 1); //1 sector at a time...
 	//send rem lba bytes sequentially across ports
 	outb(0x1F3, (u8)lba); //bits 0-7
@@ -2411,7 +2419,7 @@ void ata_write_sector(u32 lba, u8* buffer)
 	while(inb(_ATA_PRIMARY_STATUS) & _ATA_STATUS_BSY);
 
 	//select the drive (Master) and pass the highest 4 bits of the LBA
-	outb(_ATA_PRIMARY_DRIVE, 0xF0 | ((lba >> 24) & 0x0F));
+	outb(_ATA_PRIMARY_DRIVE, ata_drive_select | ((lba >> 24) & 0x0F));
 
 	//send the sector count (1 sector at a time)
 	outb(_ATA_PRIMARY_SECCOUNT, 1);
