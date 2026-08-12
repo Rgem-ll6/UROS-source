@@ -11,7 +11,7 @@ ENTRY_OBJ   = entry.o
 KERNEL_OBJ  = uroskrnl.o
 KERNEL_ELF  = uroskrnl.elf
 KERNEL_BIN  = uroskrnl.bin
-OS_IMAGE    = Bikt_OS.img
+OS_IMAGE    = uros.img
 
 .PHONY: all qemu clean
 
