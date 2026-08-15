@@ -45,7 +45,8 @@ qemu: $(OS_IMAGE)
 		-drive format=raw,file=Rhema.img,index=1,media=disk \
 		-boot order=c,menu=on \
 		-m 2560M -smp 2 -usb -usbdevice tablet \
-		-serial stdio -enable-kvm -display gtk
+		-serial stdio -enable-kvm -display sdl \
+		-machine pc
 
 clean:
 	rm -f *.o *.bin *.elf *.img
