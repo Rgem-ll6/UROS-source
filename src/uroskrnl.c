@@ -2045,6 +2045,24 @@ void vga_put_num(u32 num)
 	vga_puts(&buf[i + 1]);
 }
 
+//prints a byte count as megabytes with 2 decimal places, e.g. 1234567
+//bytes -> "1.17". the kernel is compiled with -mgeneral-regs-only, which
+//means the cpu's float registers are off-limits (real float/double math
+//won't even compile), so i fake the .2 precision with pure integer math:
+//scale the value by 100 first, then split the whole part from the
+//hundredths digits. that's how urfetch shows sub-megabyte file changes.
+void vga_put_mb_2dp(u32 bytes)
+{
+	//x100 multiplication in u64 so big disks can't overflow the u32
+	u32 mb_x100 = (u32)(((u64)bytes * 100) / (1024 * 1024));
+
+	vga_put_num(mb_x100 / 100);
+	vga_put_c('.');
+	u32 frac = mb_x100 % 100;
+	vga_put_c((frac / 10) + '0');
+	vga_put_c((frac % 10) + '0');
+}
+
 //this method remaps the entries since long ago the PIC and Exceptions collide...
 //...so this maps the PIC IRQs at different addresses from the CPU Exceptions
 // Small delay for I/O operations
@@ -2499,11 +2517,6 @@ __attribute__((interrupt)) void keyboard_handler(void *frame)
             char c = kdb_map[scancode];
             if (c != 0)
             {
-                // shift + caps lock logic:
-                //   shift held      -> grab the symbol/uppercase partner
-                //                      from kdb_map_shift (shift+caps flips
-                //                      letters back to lowercase)
-                //   caps alone      -> uppercase only the letters
                 if (shift_pressed)
                 {
                     c = kdb_map_shift[scancode];
@@ -2964,11 +2977,13 @@ void cmd_fetch(void)
         u32 free_bytes = (total_bytes > used_bytes) ? (total_bytes - used_bytes) : 0;
 
         vga_puts("                          Disk: ");
-        vga_put_num(free_bytes / (1024 * 1024));
+        // .2 precision via vga_put_mb_2dp so a freshly written load.txt
+        // actually moves the used/free numbers in the hundredths place
+        vga_put_mb_2dp(free_bytes);
         vga_puts(" MB free / ");
-        vga_put_num(total_bytes / (1024 * 1024));
+        vga_put_mb_2dp(total_bytes);
         vga_puts(" MB total (");
-        vga_put_num(used_bytes / (1024 * 1024));
+        vga_put_mb_2dp(used_bytes);
         vga_puts(" MB used)\n");
     } else {
         vga_puts("RAM-Backed Mock FS\n");
