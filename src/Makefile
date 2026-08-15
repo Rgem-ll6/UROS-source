@@ -41,12 +41,20 @@ $(OS_IMAGE): $(BOOT_BIN) $(KERNEL_BIN)
 #and the main filesystem has to be formatted to the FAT32 format, sorry for the constraint...
 qemu: $(OS_IMAGE)
 	qemu-system-i386 \
-		-drive format=raw,file=$(OS_IMAGE),index=0,media=disk \
-		-drive format=raw,file=Rhema.img,index=1,media=disk \
-		-boot order=c,menu=on \
-		-m 2560M -smp 2 -usb -usbdevice tablet \
-		-serial stdio -enable-kvm -display sdl \
-		-machine pc
+    -drive format=raw,file=$(OS_IMAGE),index=0,media=disk,if=ide \
+    -drive format=raw,file=Rhema.img,index=1,media=disk,if=ide \
+    -boot order=c,menu=on \
+    -m 2560M \
+    -smp 2,cores=2,threads=1 \
+    -enable-kvm \
+    -cpu host \
+    -machine pc \
+    -vga std \
+    -display sdl \
+    -device usb-ehci,id=usb \
+    -device usb-tablet,bus=usb.0 \
+    -serial stdio \
+    -d guest_errors,int
 
 clean:
 	rm -f *.o *.bin *.elf *.img

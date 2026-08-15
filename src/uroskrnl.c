@@ -251,6 +251,7 @@ u32 fat32_write(struct vfs_node *node, u32 offset, u32 size, u8 *buffer);
 void format_fat_name(const char* src, u8* dest);
 void fat32_write_fat_entry(u32 cluster, u32 value);
 u32 fat32_find_free_cluster(void);
+u32 fat32_count_used_clusters(void);
 int fat32_create_dir(u32 parent_cluster, const char* dirname);
 int fat32_add_entry(u32 dir_cluster, const char* filename, u8 attrib, u32 starting_cluster, u32 file_size);
 void fat32_sync_directory_metadata(vfs_node_t *file_node, u32 parent_dir_cluster, u32 newsize, u32 first_cluster);
@@ -693,6 +694,13 @@ static u32 data_start_sector = 0;
 
 static char current_working_dir[256] = "/";
 static u32 current_dir_cluster = 2; //defaultt fallback to Cluster 2, FAT32 standard root
+
+//total sector count of the drive as reported by the ATA identify command
+//at boot (words 60/61 of the identify data). urfetch uses this for the
+//storage capacity line. note: mounted_bpb->total_sectors_32 reads 0 on my
+//disk image (see the TODO in fat32_find_free_cluster), so this is the only
+//reliable number i have for "how big is the disk".
+static u32 ata_total_sectors = 0;
 
 //a simple in-memory test driver (used only when no disk is mounted)
 static vfs_node_t* mock_bin_dir = NULL;
@@ -1373,6 +1381,58 @@ u32 fat32_find_free_cluster(void)
 	return 0; //DISK full!
 }
 
+//walks the ENTIRE FAT table and counts how many clusters are currently
+//allocated (any entry that isn't 0). used_clusters * bytes_per_cluster
+//gives me the "disk used" number that urfetch prints. it's basically my
+//own little df - the same trick fat32_find_free_cluster uses, but instead
+//of stopping at the first free slot i read every single entry.
+//
+//careful: mounted_bpb->total_sectors_32 reads 0 on my disk image (same
+//bug the TODO above mentions), so total_data_sectors would underflow to
+//billions and this loop would hang the whole fetch command. that's why i
+//fall back to the real hardware size from the ATA identify data
+//(ata_total_sectors) whenever the BPB field looks broken.
+u32 fat32_count_used_clusters(void)
+{
+	if (mounted_bpb == NULL) return 0;
+
+	//total data sectors = volume size minus everything that lives before
+	//the data region (reserved sectors + all fat copies). guard the
+	//broken BPB field first...
+	u32 total_data_sectors = mounted_bpb->total_sectors_32;
+	if (total_data_sectors == 0 || total_data_sectors <= data_start_sector)
+	{
+		total_data_sectors = ata_total_sectors - data_start_sector;
+	} else {
+		total_data_sectors -= data_start_sector;
+	}
+
+	u32 total_clusters = total_data_sectors / mounted_bpb->sectors_per_cluster;
+
+	u8* fat_sector_buffer = (u8*)kmalloc(512);
+	if (!fat_sector_buffer) return 0;
+
+	u32 used_clusters = 0;
+	//scan from cluster 2 (the first real cluster) all the way to the end
+	for (u32 cluster = 2; cluster < total_clusters + 2; cluster++)
+	{
+		u32 fat_sector = partition_offset + fat_start_sector + ((cluster * 4) / 512);
+		u32 fat_offset = (cluster * 4) % 512;
+
+		//re-read the fat sector only when we cross into a new one
+		if (fat_offset == 0 || cluster == 2)
+		{
+			ata_read_sector(fat_sector, fat_sector_buffer);
+		}
+
+		u32 entry_val = *(u32*)&fat_sector_buffer[fat_offset] & 0x0FFFFFFF;
+		if (entry_val != 0) used_clusters++;
+	}
+
+	kfree(fat_sector_buffer);
+	return used_clusters;
+}
+
 //helper to pad/format the filename to the standard 8.3 FAT format
 // example "test.txt" becomes "TEST  TXT"
 void format_fat_name(const char* src, u8* dest)
@@ -1525,6 +1585,129 @@ void cmd_touch(const char *filename)
 	} else {
 		vga_puts("[ ERROR ] - Could not create file. \n");
 	}
+}
+
+//command: rm <filename> - delete a FILE from the current directory.
+//fat32 has no real "delete" operation, so i do two things:
+//  1. tombstone the directory entry: flip its first name byte to 0xE5
+//     (the standard "deleted" marker). ls skips those, and the next
+//     fat32_add_entry call can reuse the slot. the bytes stay on disk,
+//     that's normal fat32 - undeleting is possible in theory.
+//  2. release the file's cluster chain: follow every cluster the file
+//     owned and write 0 into its fat entry, so fat32_find_free_cluster
+//     can hand those clusters out to new files again.
+//directories are rejected for now (i only remove files first, as planned).
+void cmd_rm(const char *filename)
+{
+	if (mounted_bpb == NULL)
+	{
+		vga_puts("[ ERROR ] - No mounted disk/drive. Cannot delete file. \n");
+		return;
+	}
+
+	if (!filename || filename[0] == '\0')
+	{
+		vga_puts("Usage: rm <filename>\n");
+		return;
+	}
+
+	u32 current_cluster = current_dir_cluster;
+	u8 *buffer = (u8*)kmalloc(512);
+	u8 *fat_buffer = (u8*)kmalloc(512);
+	if (!buffer || !fat_buffer)
+	{
+		vga_puts("[ RM ERROR ] - Heap allocation failed. \n");
+		kfree(buffer);
+		kfree(fat_buffer);
+		return;
+	}
+
+	//walk the whole directory cluster chain like fat32_finddir does, so
+	//entries living beyond the first sector still get found.
+	while (current_cluster < 0x0FFFFFF8 && current_cluster != 0)
+	{
+		u32 start_sector = fat32_cluster_to_sector(current_cluster);
+
+		for (u32 s = 0; s < mounted_bpb->sectors_per_cluster; s++)
+		{
+			ata_read_sector(start_sector + s, buffer);
+			FAT32_DirEntry *entries = (FAT32_DirEntry*)buffer;
+
+			for (int i = 0; i < 16; ++i)
+			{
+				if (entries[i].name[0] == 0x00) //end of directory stream
+				{
+					kfree(buffer);
+					kfree(fat_buffer);
+					vga_puts("[ RM ERROR ] - No such file: ");
+					vga_puts(filename);
+					vga_puts("\n");
+					return;
+				}
+				if (entries[i].name[0] == 0xE5) continue; //deleted entry
+				if (entries[i].attr == 0x0F) continue; //LFN helper entry
+				if (entries[i].attr & 0x08) continue; //volume label
+
+				if (fat32_compare_name(filename, entries[i].name) == 0)
+				{
+					//safety: refuse to delete folders for now
+					if (entries[i].attr & 0x10)
+					{
+						vga_puts("[ RM ERROR ] - '");
+						vga_puts(filename);
+						vga_puts("' is a directory. rm only handles files for now. \n");
+						kfree(buffer);
+						kfree(fat_buffer);
+						return;
+					}
+
+					//1. free the file's whole cluster chain back into the
+					//fat pool: read the entry, remember where the chain
+					//goes next, then write 0 (free) over it.
+					u32 file_cluster = ((u32)entries[i].first_cluster_hi << 16) | entries[i].first_cluster_lo;
+					u32 release_cluster = file_cluster;
+					while (release_cluster >= 2 && release_cluster < 0x0FFFFFF8)
+					{
+						u32 fat_sector = partition_offset + fat_start_sector + ((release_cluster * 4) / 512);
+						u32 fat_offset = (release_cluster * 4) % 512;
+
+						ata_read_sector(fat_sector, fat_buffer);
+						u32 next_cluster = *(u32*)&fat_buffer[fat_offset] & 0x0FFFFFFF;
+
+						//0 = never allocated, so find_free_cluster gives it back out
+						*(u32*)&fat_buffer[fat_offset] = 0;
+						ata_write_sector(fat_sector, fat_buffer);
+
+						release_cluster = next_cluster;
+					}
+
+					//2. tombstone the directory entry on disk
+					entries[i].name[0] = 0xE5;
+					ata_write_sector(start_sector + s, buffer);
+
+					vga_puts("[ SUCCESS ] - Removed file: ");
+					vga_puts(filename);
+					vga_puts("\n");
+
+					kfree(buffer);
+					kfree(fat_buffer);
+					return;
+				}
+			}
+		}
+
+		//follow the fat chain to the directory's next cluster
+		u32 fat_sector = partition_offset + fat_start_sector + ((current_cluster * 4) / 512);
+		u32 fat_offset = (current_cluster * 4) % 512;
+		ata_read_sector(fat_sector, fat_buffer);
+		current_cluster = *(u32*)&fat_buffer[fat_offset] & 0x0FFFFFFF;
+	}
+
+	kfree(buffer);
+	kfree(fat_buffer);
+	vga_puts("[ RM ERROR ] - No such file: ");
+	vga_puts(filename);
+	vga_puts("\n");
 }
 
 //command: ls - list the contents of a directory
@@ -2236,6 +2419,24 @@ const char kdb_map[] = {
     'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
 };
 
+// the SHIFTED partner of every key above: same scancode positions, but
+// shift+1 = '!', shift+; = ':' and so on. letters are stored uppercase
+// here, the handler mixes shift/caps on top of that.
+const char kdb_map_shift[] = {
+    0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
+    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
+    'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' '
+};
+
+// the numpad cluster (non-extended scancodes 0x47-0x53). with numlock on
+// the keypad sends these plain scancodes and they always mean digits and
+// operators, so i map them directly. the extended versions (arrows,
+// delete, insert...) carry a 0xE0 prefix and stay ignored for now.
+const char kdb_map_numpad[] = {
+    '7', '8', '9', '-', '4', '5', '6', '+', '1', '2', '3', '0', '.'
+};
+
 // PS/2 KEYBOARD DRIVER. every key press/release sends a scancode byte on
 // port 0x60, and kdb_map translates scancode -> character. the handler
 // pushes chars into a ring buffer and the shell pops them out later - the
@@ -2277,17 +2478,38 @@ __attribute__((interrupt)) void keyboard_handler(void *frame)
         else if (scancode == 0x0E) // Backspace
         {
             buffer_push('\b');
-        } 
+        }
+        // keypad '/' and Enter send 0xE0-prefixed scancodes, translate them
+        else if (is_extended && scancode == 0x35)
+        {
+            buffer_push('/');
+        }
+        else if (is_extended && scancode == 0x1C)
+        {
+            buffer_push('\n');
+        }
+        // numpad digits/operators (0x47-0x53) always produce their symbol
+        else if (!is_extended && scancode >= 0x47 && scancode <= 0x53)
+        {
+            buffer_push(kdb_map_numpad[scancode - 0x47]);
+        }
         // Safety Guard: Bounds check against array size & ignore extended keys
         else if (!is_extended && scancode < sizeof(kdb_map))
         {
             char c = kdb_map[scancode];
             if (c != 0)
             {
-                // Handle shift XOR caps lock logic for lettering
-                if ((shift_pressed ^ caps_lock) && (c >= 'a' && c <= 'z'))
+                // shift + caps lock logic:
+                //   shift held      -> grab the symbol/uppercase partner
+                //                      from kdb_map_shift (shift+caps flips
+                //                      letters back to lowercase)
+                //   caps alone      -> uppercase only the letters
+                if (shift_pressed)
                 {
-                    c -= 32; // Upper case
+                    c = kdb_map_shift[scancode];
+                    if (caps_lock && c >= 'A' && c <= 'Z') c += 32;
+                } else if (caps_lock && c >= 'a' && c <= 'z') {
+                    c -= 32;
                 }
                 buffer_push(c);
             }
@@ -2553,6 +2775,8 @@ int ata_identify_slave(void)
 
 	// Extract total 28-bit LBA sectors out of words 60 and 61
 	u32 total_sectors = ((u32)info[61] << 16) | info[60];
+	// stash it in the global so urfetch can print storage capacity later
+	ata_total_sectors = total_sectors;
 	vga_puts(" (");
 	vga_put_num((total_sectors * 512) / (1024 * 1024));
 	vga_puts(" MB)\n");
@@ -2726,6 +2950,26 @@ void cmd_fetch(void)
     vga_puts("                          Storage / VFS {urfs}: ");
     if (mounted_bpb != NULL) {
         vga_puts("FAT32 Volume (Hardware)\n");
+
+        // walk the whole FAT table and count allocated clusters - that's
+        // how much of the drive is genuinely in use right now. each used
+        // cluster is bytes_per_cluster bytes of disk real estate.
+        u32 used_clusters = fat32_count_used_clusters();
+        u32 bytes_per_cluster = mounted_bpb->sectors_per_cluster * 512;
+        u32 used_bytes = used_clusters * bytes_per_cluster;
+
+        // total drive size comes from the ATA identify data captured at
+        // boot (ata_total_sectors, words 60/61). free = total - used.
+        u32 total_bytes = ata_total_sectors * 512;
+        u32 free_bytes = (total_bytes > used_bytes) ? (total_bytes - used_bytes) : 0;
+
+        vga_puts("                          Disk: ");
+        vga_put_num(free_bytes / (1024 * 1024));
+        vga_puts(" MB free / ");
+        vga_put_num(total_bytes / (1024 * 1024));
+        vga_puts(" MB total (");
+        vga_put_num(used_bytes / (1024 * 1024));
+        vga_puts(" MB used)\n");
     } else {
         vga_puts("RAM-Backed Mock FS\n");
     }
@@ -2806,7 +3050,7 @@ void cmd_buffer(const char *filename) {
         vga_puts("[ URBUFFER ERROR ] Out of memory. Heap allocation failed.\n");
         return;
     }
-    memset(text_buf, ' ', _EDIT_BUF_SIZE);
+    memset(text_buf, 0, _EDIT_BUF_SIZE);
 
     // Clear editing space on screen (Rows 0-23)
     volatile u16 *vga = (volatile u16 *)_VGA_ADDRESS;
@@ -2860,7 +3104,7 @@ void cmd_buffer(const char *filename) {
             break;
         }
         
-        // Handle Backspace
+        // Handle Backspace - wipe the char out of both the buffer and the screen
         else if (c == '\b') {
             if (cur_x > 0) {
                 cur_x--;
@@ -2868,13 +3112,17 @@ void cmd_buffer(const char *filename) {
                 cur_y--;
                 cur_x = _EDIT_COLS - 1;
             }
-            text_buf[cur_y * _EDIT_COLS + cur_x] = ' ';
+            text_buf[cur_y * _EDIT_COLS + cur_x] = 0;
             vga[cur_y * _EDIT_COLS + cur_x] = (u16)' ' | ((u16)_VGA_ATTR << 8);
         }
         
-        // Handle Enter Key
+        // Handle Enter Key - store the newline IN the buffer too. this
+        // was the "cat can't read multi-line" bug: before, Enter only
+        // moved the cursor down and never wrote a '\n', so every saved
+        // file came out as one giant single line.
         else if (c == '\n') {
             if (cur_y < _EDIT_ROWS - 1) {
+                text_buf[cur_y * _EDIT_COLS + cur_x] = '\n';
                 cur_y++;
                 cur_x = 0;
             }
@@ -2899,9 +3147,9 @@ void cmd_buffer(const char *filename) {
 
     // --- FAT32 Persistent Write back ---
     if (mounted_bpb != NULL) {
-        // Compute actual payload size ignoring trailing whitespace
+        // Compute actual payload size ignoring trailing null bytes
         u32 payload_len = _EDIT_BUF_SIZE;
-        while (payload_len > 0 && text_buf[payload_len - 1] == ' ') {
+        while (payload_len > 0 && text_buf[payload_len - 1] == 0) {
             payload_len--;
         }
 
@@ -3082,7 +3330,7 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						vga_puts("help| exit | whereami | urfetch | clear | ping | wifi| mem\n");
 						vga_puts("mmap| whoami| alloc_test | mock cat| ls | pwd | cd <dir>\n");
 						vga_puts("touch <filename>| poweroff | vm reboot | mkdir <dirname>\n");
-                        vga_puts("buffer <filename>\n");
+                        vga_puts("buffer <filename>| rm <filename>\n");
 					} else if (strcmp(shell_buffer, "clear") == 0){
 						// Quick screen clear: reset cursor and wipe VGA memory space
                     	extern long unsigned int cursor_pos;
@@ -3188,6 +3436,10 @@ void kmain(u32 memory_entries_count, MemoryMapEntry* mmap_entries)
 						//touch command
 						const char* filename = &shell_buffer[6];
 						cmd_touch(filename);
+					} else if (shell_buffer[0] == 'r' && shell_buffer[1] == 'm' && shell_buffer[2] == ' '){
+						//rm command - files only for now, directories are rejected inside cmd_rm
+						const char* filename = &shell_buffer[3];
+						cmd_rm(filename);
 					} else if (shell_buffer[0] == 'c' && shell_buffer[1] == 'a' && shell_buffer[2] == 't' && shell_buffer[3] == ' '){
 						//cat command
 					    const char* file_path = &shell_buffer[4];
